@@ -1,0 +1,2 @@
+{"id": 4, "claim": "Vitamin D has multiple supporting rationales.", "evidence": {"10": [{"label": "SUPPORT", "sentences": [0]}, {"label": "SUPPORT", "sentences": [2]}]}, "cited_doc_ids": [10]}
+{"id": 5, "claim": "The study observed the claimed effect.", "evidence": {"20": [{"label": "CONTRADICT", "sentences": [1]}]}, "cited_doc_ids": [20]}

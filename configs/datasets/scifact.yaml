@@ -1,0 +1,6 @@
+schema_version: "1.0.0"
+dataset: scifact
+display_name: SciFact
+adapter_manifest:
+  artifact_type: normalized_dataset
+  required_files: [claims.jsonl, documents.jsonl, label_mapping.json, quality_report.json, manifest.json]

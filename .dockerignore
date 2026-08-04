@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+.codegraph
+.pytest_cache
+__pycache__
+*.pyc
+.env
+data/raw
+data/processed
+artifacts
+reports

@@ -1,0 +1,5 @@
+schema_version: "1.0.0"
+split_manifest_version: medical-splits-v1
+threshold_selection_split: dev
+calibration_split: dev
+mixed_three_label_policy: exclude

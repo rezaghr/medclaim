@@ -1,0 +1,19 @@
+{
+  "retrieval_mode": "hybrid_reranked",
+  "final_evidence_k": 5,
+  "evidence_gate": {
+    "enabled": true,
+    "config_path": "artifacts/evidence-gates/evidence-gate-v1/config.json"
+  },
+  "decomposition": {
+    "mode": "auto",
+    "max_components": 4,
+    "prompt_version": "claim-decomposition-v1"
+  },
+  "labels": [
+    "SUPPORTS",
+    "REFUTES",
+    "NOT_ENOUGH_INFO",
+    "MIXED"
+  ]
+}

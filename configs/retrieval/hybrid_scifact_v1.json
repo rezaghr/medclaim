@@ -1,0 +1,8 @@
+{
+  "mode": "hybrid",
+  "sparse_top_k": 50,
+  "dense_top_k": 50,
+  "fusion_top_k": 30,
+  "rrf_k": 60,
+  "final_evidence_k": 5
+}

@@ -1,0 +1,3 @@
+{"id": 1, "claim": "  Vitamin D   affects immunity.  ", "evidence": {"10": [{"label": "SUPPORT", "sentences": [0, 1]}]}, "cited_doc_ids": [10, 30]}
+{"id": 2, "claim": "The intervention always produces an effect.", "evidence": {"20": [{"label": "CONTRADICT", "sentences": [1]}]}, "cited_doc_ids": [20]}
+{"id": 3, "claim": "A cited document need not contain a rationale.", "evidence": {}, "cited_doc_ids": [30]}
