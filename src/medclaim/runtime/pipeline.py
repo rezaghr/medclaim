@@ -6,7 +6,6 @@ from typing import Any
 
 from medclaim.evidence_gate import EvidenceGate, EvidenceGateConfiguration
 from medclaim.reranking import (
-    CrossEncoderReranker,
     OllamaEvidenceReranker,
     RerankingConfiguration,
 )
@@ -21,7 +20,6 @@ from medclaim.security import SecureVerifier
 from medclaim.verification import VerificationPipeline
 
 from .configuration import RuntimeSettings
-from .fakes import FakeVerificationPipeline
 from .ollama import OllamaProvider
 
 
@@ -30,12 +28,6 @@ class RuntimePipelineError(Exception):
 
 
 def build_runtime_pipeline(settings: RuntimeSettings):
-    if settings.llm_provider == "fake":
-        return FakeVerificationPipeline()
-    if settings.llm_provider != "ollama":
-        raise RuntimePipelineError(
-            f"PIPELINE_PROVIDER_UNSUPPORTED: {settings.llm_provider!r}."
-        )
     if settings.corpus_dir is None:
         raise RuntimePipelineError("PIPELINE_NOT_READY: Corpus directory is not configured.")
 
@@ -73,9 +65,7 @@ def build_runtime_pipeline(settings: RuntimeSettings):
         retriever = HybridRetriever(sparse, dense)
         score_field = "rrf_score"
     else:
-        raise RuntimePipelineError(
-            f"PIPELINE_RETRIEVAL_UNSUPPORTED: {settings.retrieval_mode!r}."
-        )
+        raise RuntimePipelineError(f"PIPELINE_RETRIEVAL_UNSUPPORTED: {settings.retrieval_mode!r}.")
 
     provider = OllamaProvider(
         settings.llm_model,
@@ -89,22 +79,14 @@ def build_runtime_pipeline(settings: RuntimeSettings):
             candidate_count=settings.retrieval_candidate_count,
             final_evidence_k=settings.top_k,
             batch_size=settings.reranker_batch_size,
-            device="ollama" if settings.reranker_provider == "ollama" else "auto",
+            device="ollama",
         )
-        if settings.reranker_provider == "ollama":
-            reranker = OllamaEvidenceReranker(
-                provider,
-                model_id=settings.reranker_model,
-                batch_size=reranking.batch_size,
-                maximum_input_length=reranking.maximum_input_length,
-            )
-        else:
-            reranker = CrossEncoderReranker(
-                settings.reranker_model,
-                device=reranking.device,
-                batch_size=reranking.batch_size,
-                maximum_input_length=reranking.maximum_input_length,
-            )
+        reranker = OllamaEvidenceReranker(
+            provider,
+            model_id=settings.reranker_model,
+            batch_size=reranking.batch_size,
+            maximum_input_length=reranking.maximum_input_length,
+        )
         retriever = RerankedRetriever(retriever, reranker, reranking)
         score_field = "reranker_score"
     verifier = SecureVerifier(provider)

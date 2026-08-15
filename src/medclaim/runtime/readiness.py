@@ -113,37 +113,22 @@ def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
         return details or {"models": "not_required"}
 
     record("models", model_check)
+
     def verifier_check() -> str:
-        if not settings.llm_provider or not settings.llm_model:
-            raise ValueError("verifier provider/model is not configured")
-        if settings.llm_provider == "ollama":
-            return OllamaProvider(
-                settings.llm_model,
-                settings.ollama_base_url,
-                settings.llm_timeout_seconds,
-            ).check()
-        return settings.llm_model
+        if not settings.llm_model:
+            raise ValueError("verifier model is not configured")
+        return OllamaProvider(
+            settings.llm_model,
+            settings.ollama_base_url,
+            settings.llm_timeout_seconds,
+        ).check()
 
     record("verifier", verifier_check)
     record(
-        "gate_calibrator",
-        lambda: (
-            {"gate": settings.gate_version, "calibrator": settings.calibrator_version}
-            if settings.gate_version and settings.calibrator_version
-            else (_ for _ in ()).throw(ValueError("gate/calibrator versions are incompatible"))
-        ),
-    )
-    record(
-        "persistence",
-        lambda: (
-            "disabled"
-            if not settings.persistence_enabled
-            else (
-                "configured"
-                if settings.database_url_configured
-                else (_ for _ in ()).throw(ValueError("persistence schema unavailable"))
-            )
-        ),
+        "evidence_gate",
+        lambda: settings.gate_version
+        if settings.gate_version
+        else (_ for _ in ()).throw(ValueError("gate version is missing")),
     )
     return {
         "status": "ready" if not errors else "not_ready",

@@ -21,17 +21,16 @@ class RuntimeSettings(BaseModel):
 
     configuration_id: str = "deployment-v1"
     environment: str = "development"
-    llm_provider: str = "fake"
-    llm_model: str = "fake-verifier-v1"
+    llm_model: str = "dolphin-llama3:8b"
     ollama_base_url: str = "http://127.0.0.1:11434"
     llm_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
     corpus_dir: Path | None = None
     bm25_index_dir: Path | None = None
     dense_index_dir: Path | None = None
-    embedding_provider: str = "sentence_transformers"
-    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_provider: str = "ollama"
+    embedding_model: str = "nomic-embed-text:latest"
     embedding_query_prefix: str = ""
-    reranker_provider: str = "cross_encoder"
+    reranker_provider: str = "ollama"
     reranker_model: str = "disabled"
     reranker_batch_size: int = Field(default=8, ge=1, le=30)
     retrieval_mode: str = "hybrid"
@@ -42,11 +41,6 @@ class RuntimeSettings(BaseModel):
     gate_minimum_unique_documents: int = Field(default=1, ge=1, le=100)
     prompt_version: str = "medical-verifier-v3-secure"
     gate_version: str = "evidence-gate-v1"
-    calibrator_version: str = "confidence-calibrator-v1"
-    persistence_enabled: bool = False
-    persist_claim_text: bool = False
-    persist_explanation: bool = False
-    database_url_configured: bool = False
     log_level: str = "INFO"
     log_format: str = "json"
 
@@ -63,7 +57,6 @@ class RuntimeSettings(BaseModel):
 
 _ENV_MAP = {
     "MEDCLAIM_ENV": "environment",
-    "LLM_PROVIDER": "llm_provider",
     "LLM_MODEL": "llm_model",
     "OLLAMA_BASE_URL": "ollama_base_url",
     "LLM_TIMEOUT_SECONDS": "llm_timeout_seconds",
@@ -80,20 +73,9 @@ _ENV_MAP = {
     "MEDCLAIM_RETRIEVAL_CANDIDATE_COUNT": "retrieval_candidate_count",
     "MEDCLAIM_TOP_K": "top_k",
     "MEDCLAIM_GATE_MINIMUM_SCORE": "gate_minimum_score",
-    "PERSISTENCE_ENABLED": "persistence_enabled",
-    "PERSIST_CLAIM_TEXT": "persist_claim_text",
-    "PERSIST_EXPLANATION": "persist_explanation",
     "LOG_LEVEL": "log_level",
     "LOG_FORMAT": "log_format",
 }
-_BOOLEAN_FIELDS = {"persistence_enabled", "persist_claim_text", "persist_explanation"}
-
-
-def _boolean(value: str, name: str) -> bool:
-    normalized = value.strip().casefold()
-    if normalized not in {"true", "false"}:
-        raise RuntimeConfigurationError(f"CONFIG_INVALID: {name} must be true or false.")
-    return normalized == "true"
 
 
 def load_runtime_settings(
@@ -108,17 +90,11 @@ def load_runtime_settings(
         raise RuntimeConfigurationError(f"CONFIG_INVALID: Could not load {path}: {exc}.") from exc
     if not isinstance(raw, dict):
         raise RuntimeConfigurationError("CONFIG_INVALID: Deployment YAML must contain an object.")
-    if "database_url_configured" in raw:
-        raise RuntimeConfigurationError(
-            "CONFIG_INVALID: database_url_configured is derived from the environment and cannot appear in YAML."
-        )
     values: dict[str, Any] = dict(raw)
     source = os.environ if environ is None else environ
     for env_name, field in _ENV_MAP.items():
         if env_name in source and source[env_name] != "":
-            if field in _BOOLEAN_FIELDS:
-                values[field] = _boolean(source[env_name], env_name)
-            elif field in {"llm_timeout_seconds", "gate_minimum_score"}:
+            if field in {"llm_timeout_seconds", "gate_minimum_score"}:
                 try:
                     values[field] = float(source[env_name])
                 except ValueError as exc:
@@ -127,23 +103,14 @@ def load_runtime_settings(
                     ) from exc
             else:
                 values[field] = source[env_name]
-    values["database_url_configured"] = bool(source.get("DATABASE_URL", ""))
     try:
         settings = RuntimeSettings.model_validate(values)
     except ValidationError as exc:
         raise RuntimeConfigurationError(f"CONFIG_INVALID: {exc.errors()[0]['msg']}.") from exc
-    if settings.llm_provider not in {"fake", "ollama"}:
-        raise RuntimeConfigurationError(
-            "CONFIG_INVALID: llm_provider must be fake or ollama."
-        )
-    if settings.embedding_provider not in {"sentence_transformers", "ollama"}:
-        raise RuntimeConfigurationError(
-            "CONFIG_INVALID: embedding_provider must be sentence_transformers or ollama."
-        )
-    if settings.reranker_provider not in {"cross_encoder", "ollama"}:
-        raise RuntimeConfigurationError(
-            "CONFIG_INVALID: reranker_provider must be cross_encoder or ollama."
-        )
+    if settings.embedding_provider != "ollama":
+        raise RuntimeConfigurationError("CONFIG_INVALID: embedding_provider must be ollama.")
+    if settings.reranker_provider != "ollama":
+        raise RuntimeConfigurationError("CONFIG_INVALID: reranker_provider must be ollama.")
     if settings.retrieval_mode not in {"bm25", "dense", "hybrid", "hybrid_reranked"}:
         raise RuntimeConfigurationError(
             "CONFIG_INVALID: retrieval_mode must be bm25, dense, hybrid, or hybrid_reranked."
@@ -153,18 +120,7 @@ def load_runtime_settings(
             "CONFIG_INVALID: top_k cannot exceed retrieval_candidate_count."
         )
     if settings.retrieval_mode == "hybrid_reranked" and settings.gate_minimum_score > 1:
-        raise RuntimeConfigurationError(
-            "CONFIG_INVALID: reranker gate score cannot exceed one."
-        )
-    if settings.persist_claim_text or settings.persist_explanation:
-        if not settings.persistence_enabled:
-            raise RuntimeConfigurationError(
-                "CONFIG_PRIVACY_INVALID: Content persistence requires persistence_enabled."
-            )
-    if settings.persistence_enabled and not settings.database_url_configured:
-        raise RuntimeConfigurationError(
-            "CONFIG_MISSING_SECRET: DATABASE_URL is required when persistence is enabled."
-        )
+        raise RuntimeConfigurationError("CONFIG_INVALID: reranker gate score cannot exceed one.")
     if strict:
         required = [("MEDCLAIM_CORPUS_DIR", settings.corpus_dir), ("LLM_MODEL", settings.llm_model)]
         if settings.retrieval_mode in {"bm25", "hybrid", "hybrid_reranked"}:
@@ -184,8 +140,6 @@ def load_runtime_settings(
                 )
             )
         missing = [name for name, value in required if not value]
-        if settings.llm_provider not in {"fake", "ollama"} and not source.get("LLM_API_KEY"):
-            missing.append("LLM_API_KEY")
         if missing:
             raise RuntimeConfigurationError(f"CONFIG_MISSING_REQUIRED: {missing[0]} is required.")
     return settings

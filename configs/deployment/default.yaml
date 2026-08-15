@@ -1,6 +1,5 @@
 configuration_id: deployment-v1
 environment: development
-llm_provider: ollama
 llm_model: dolphin-llama3:8b
 ollama_base_url: http://127.0.0.1:11434
 llm_timeout_seconds: 120
@@ -21,9 +20,5 @@ gate_minimum_relevant_passages: 1
 gate_minimum_unique_documents: 1
 prompt_version: medical-verifier-v3-secure
 gate_version: evidence-gate-v1
-calibrator_version: confidence-calibrator-v1
-persistence_enabled: false
-persist_claim_text: false
-persist_explanation: false
 log_level: INFO
 log_format: json
