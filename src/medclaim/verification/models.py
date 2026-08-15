@@ -24,9 +24,7 @@ class AtomicClaimResult:
     model_input_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        value = asdict(self)
-        value["gate_decision"] = self.gate_decision.to_dict()
-        return value
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -40,12 +38,4 @@ class VerificationResult:
     technical_metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "verdict": self.verdict,
-            "confidence": self.confidence,
-            "explanation": self.explanation,
-            "evidence_used": list(self.evidence_used),
-            "component_results": [item.to_dict() for item in self.component_results],
-            "limitations": list(self.limitations),
-            "technical_metadata": dict(self.technical_metadata),
-        }
+        return asdict(self)

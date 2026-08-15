@@ -23,8 +23,4 @@ class ClaimDecomposition:
     explanation: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "is_compound": self.is_compound,
-            "atomic_claims": [claim.to_dict() for claim in self.atomic_claims],
-            "explanation": self.explanation,
-        }
+        return asdict(self)
