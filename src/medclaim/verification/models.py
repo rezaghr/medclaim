@@ -38,11 +38,6 @@ class VerificationResult:
     component_results: list[AtomicClaimResult] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     technical_metadata: dict[str, Any] = field(default_factory=dict)
-    raw_confidence: float | None = None
-    calibrated_confidence: float | None = None
-    confidence_method: str = "raw"
-    calibrator_version: str | None = None
-    confidence_warning: str = "Uncalibrated model confidence estimate."
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -53,11 +48,4 @@ class VerificationResult:
             "component_results": [item.to_dict() for item in self.component_results],
             "limitations": list(self.limitations),
             "technical_metadata": dict(self.technical_metadata),
-            "raw_confidence": (
-                self.confidence if self.raw_confidence is None else self.raw_confidence
-            ),
-            "calibrated_confidence": self.calibrated_confidence,
-            "confidence_method": self.confidence_method,
-            "calibrator_version": self.calibrator_version,
-            "confidence_warning": self.confidence_warning,
         }

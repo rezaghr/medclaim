@@ -1,11 +1,10 @@
-"""Evidence-sufficiency decisions and development-set calibration."""
+"""Evidence-sufficiency decisions."""
 
 from .gate import (
     EvidenceGate,
     EvidenceGateConfiguration,
     EvidenceGateDecision,
     EvidenceGateError,
-    load_gate_configuration,
 )
 
 __all__ = [
@@ -13,5 +12,4 @@ __all__ = [
     "EvidenceGateConfiguration",
     "EvidenceGateDecision",
     "EvidenceGateError",
-    "load_gate_configuration",
 ]

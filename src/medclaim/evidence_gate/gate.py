@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Any, Literal
 
 GateStatus = Literal["PROCEED", "ABSTAIN"]
@@ -55,19 +53,6 @@ class EvidenceGateConfiguration:
     def _invalid(message: str) -> None:
         raise EvidenceGateError(f"GATE_CONFIG_INVALID: {message}.")
 
-    @classmethod
-    def from_dict(cls, value: Any) -> "EvidenceGateConfiguration":
-        if not isinstance(value, dict):
-            cls._invalid("configuration must be a JSON object")
-        fields = set(cls.__dataclass_fields__)
-        unknown = sorted(set(value) - fields)
-        missing = sorted(fields - set(value))
-        if unknown:
-            cls._invalid(f"unknown field {unknown[0]!r}")
-        if missing:
-            cls._invalid(f"missing field {missing[0]!r}")
-        return cls(**value)
-
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -86,18 +71,6 @@ class EvidenceGateDecision:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def load_gate_configuration(path: Path) -> EvidenceGateConfiguration:
-    try:
-        with path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
-    except FileNotFoundError as exc:
-        raise EvidenceGateError(f"GATE_CONFIG_NOT_FOUND: Configuration does not exist: {path}.") from exc
-    except (OSError, json.JSONDecodeError) as exc:
-        reason = getattr(exc, "msg", str(exc))
-        raise EvidenceGateError(f"GATE_CONFIG_INVALID: Could not read {path}: {reason}.") from exc
-    return EvidenceGateConfiguration.from_dict(value)
 
 
 class EvidenceGate:

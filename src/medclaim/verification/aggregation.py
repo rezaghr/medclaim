@@ -79,5 +79,4 @@ def aggregate_component_results(
             "decomposition_prompt_version": prompt_version,
             "confidence_note": "Confidence is an estimate, not a clinical probability.",
         },
-        raw_confidence=confidence,
     )

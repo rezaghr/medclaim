@@ -108,11 +108,6 @@ class VerificationPipeline:
             component_results=result.component_results,
             limitations=result.limitations,
             technical_metadata=metadata,
-            raw_confidence=result.raw_confidence,
-            calibrated_confidence=result.calibrated_confidence,
-            confidence_method=result.confidence_method,
-            calibrator_version=result.calibrator_version,
-            confidence_warning=result.confidence_warning,
         )
 
     def _verify_component(self, claim: str, component_id: str) -> AtomicClaimResult:

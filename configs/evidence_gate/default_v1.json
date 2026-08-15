@@ -1,8 +1,0 @@
-{
-  "version": "evidence-gate-default-v1",
-  "enabled": true,
-  "minimum_score": 0.75,
-  "minimum_relevant_passages": 1,
-  "minimum_unique_documents": 1,
-  "score_field": "reranker_score"
-}
