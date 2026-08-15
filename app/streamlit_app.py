@@ -11,12 +11,6 @@ import streamlit as st
 
 from medclaim.ui import collect_used_evidence
 
-SAFETY_DISCLAIMER = (
-    "MedClaimRAG verifies textual claims against a limited indexed corpus. "
-    "It is an educational research prototype. It is not a doctor, diagnostic "
-    "system, treatment recommender, or emergency service. Its results are not medical advice."
-)
-
 
 def open_internal_api(request: urllib.request.Request, timeout: float = 30):
     """Call the trusted MedClaim API without inheriting workstation proxy settings."""
@@ -83,7 +77,11 @@ def render_retrieval_trace(verification: dict) -> None:
         if not isinstance(component, dict):
             continue
         claim_text = str(component.get("claim", ""))
-        label = f"Component {component_index}: {claim_text}" if claim_text else f"Component {component_index}"
+        label = (
+            f"Component {component_index}: {claim_text}"
+            if claim_text
+            else f"Component {component_index}"
+        )
         with st.container(border=True):
             st.markdown(f"#### {label}")
             retrieval_metadata = component.get("retrieval_metadata", {})
@@ -96,9 +94,7 @@ def render_retrieval_trace(verification: dict) -> None:
                 reranking_latency = latency.get("reranking") if isinstance(latency, dict) else None
                 columns[2].metric(
                     "Retrieval latency",
-                    f"{total_latency:.1f} ms"
-                    if isinstance(total_latency, (int, float))
-                    else "—",
+                    f"{total_latency:.1f} ms" if isinstance(total_latency, (int, float)) else "—",
                 )
                 columns[3].metric(
                     "Reranking latency",
@@ -124,11 +120,7 @@ def render_retrieval_trace(verification: dict) -> None:
 
             candidates = component.get("retrieved_candidates", [])
             model_input = component.get("model_input_evidence", [])
-            sent_ids = {
-                row.get("passage_id")
-                for row in model_input
-                if isinstance(row, dict)
-            }
+            sent_ids = {row.get("passage_id") for row in model_input if isinstance(row, dict)}
             cited_ids = set(component.get("evidence_used", []))
             if not isinstance(candidates, list) or not candidates:
                 st.info("The retriever returned no candidates for this component.")
@@ -174,62 +166,52 @@ def render_retrieval_trace(verification: dict) -> None:
                     }
                 )
 
-st.set_page_config(page_title="MedClaimRAG", page_icon="🔎")
-page = st.sidebar.radio("Page", ["Verify", "About"])
 
-if page == "About":
-    st.title("About MedClaimRAG")
-    st.warning(SAFETY_DISCLAIMER)
-    st.write("Supported datasets: HealthVer, SciFact, and PUBHEALTH.")
-else:
-    st.title("MedClaimRAG")
-    st.warning(SAFETY_DISCLAIMER)
-    claim = st.text_area("Textual medical or public-health claim", max_chars=5000)
-    if st.button("Verify claim", type="primary"):
-        request = urllib.request.Request(
-            os.environ.get("MEDCLAIM_API_URL", "http://api:8000").rstrip("/") + "/v1/verify",
-            data=json.dumps({"claim": claim}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with open_internal_api(request, timeout=30) as response:
-                result = json.load(response)
-            st.warning(result.get("safety_disclaimer", SAFETY_DISCLAIMER))
-            decision = result.get("scope_decision", {})
-            if decision.get("action") != "VERIFY":
-                st.error(decision.get("message", "This request cannot be verified."))
-            else:
-                verification = result.get("verification", {})
-                st.subheader(str(verification.get("verdict", "No verdict")))
-                st.write(verification.get("explanation", ""))
-                confidence = verification.get("confidence")
-                if isinstance(confidence, (int, float)):
-                    st.metric("Model confidence", f"{confidence:.0%}")
-                st.caption("Confidence is a model estimate, not a clinical probability.")
-                render_used_evidence(verification)
-                render_retrieval_trace(verification)
-                with st.expander("Request and full verification response"):
-                    st.json(
-                        {
-                            "request_id": result.get("request_id"),
-                            "verification": verification,
-                        }
-                    )
-        except urllib.error.HTTPError as exc:
-            try:
-                error = json.loads(exc.read().decode())
-                detail = error.get("detail", f"HTTP {exc.code}")
-            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-                detail = f"HTTP {exc.code}"
-            if detail == "PIPELINE_UNAVAILABLE":
-                st.error(
-                    "The evidence corpus and retrieval indexes are not loaded. "
-                    "Ollama is connected, but verification cannot run without indexed evidence."
+st.set_page_config(page_title="MedClaimRAG", page_icon="🔎")
+st.title("MedClaimRAG")
+claim = st.text_area("Textual medical or public-health claim", max_chars=5000)
+if st.button("Verify claim", type="primary"):
+    request = urllib.request.Request(
+        os.environ.get("MEDCLAIM_API_URL", "http://api:8000").rstrip("/") + "/v1/verify",
+        data=json.dumps({"claim": claim}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with open_internal_api(request, timeout=30) as response:
+            result = json.load(response)
+        decision = result.get("scope_decision", {})
+        if decision.get("action") != "VERIFY":
+            st.error(decision.get("message", "This request cannot be verified."))
+        else:
+            verification = result.get("verification", {})
+            st.subheader(str(verification.get("verdict", "No verdict")))
+            st.write(verification.get("explanation", ""))
+            confidence = verification.get("confidence")
+            if isinstance(confidence, (int, float)):
+                st.metric("Model confidence", f"{confidence:.0%}")
+            st.caption("Confidence is a model estimate, not a clinical probability.")
+            render_used_evidence(verification)
+            render_retrieval_trace(verification)
+            with st.expander("Request and full verification response"):
+                st.json(
+                    {
+                        "request_id": result.get("request_id"),
+                        "verification": verification,
+                    }
                 )
-            else:
-                st.error(f"The verification API rejected the request: {detail}")
-            st.warning(SAFETY_DISCLAIMER)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            st.error(f"The verification API is unavailable: {exc}")
-            st.warning(SAFETY_DISCLAIMER)
+    except urllib.error.HTTPError as exc:
+        try:
+            error = json.loads(exc.read().decode())
+            detail = error.get("detail", f"HTTP {exc.code}")
+        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+            detail = f"HTTP {exc.code}"
+        if detail == "PIPELINE_UNAVAILABLE":
+            st.error(
+                "The evidence corpus and retrieval indexes are not loaded. "
+                "Ollama is connected, but verification cannot run without indexed evidence."
+            )
+        else:
+            st.error(f"The verification API rejected the request: {detail}")
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        st.error(f"The verification API is unavailable: {exc}")
