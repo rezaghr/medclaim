@@ -7,7 +7,7 @@ import math
 from html import escape
 from typing import Any
 
-from .cross_encoder import RerankerError
+from .models import RerankerError
 
 
 RERANK_RESPONSE_SCHEMA = {

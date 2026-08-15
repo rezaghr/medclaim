@@ -5,8 +5,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from medclaim.reranking.cross_encoder import RerankerError
-from medclaim.reranking.models import EvidenceReranker, RerankingConfiguration
+from medclaim.reranking.models import EvidenceReranker, RerankerError, RerankingConfiguration
 
 
 class RerankedRetrievalError(Exception):
