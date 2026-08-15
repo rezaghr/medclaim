@@ -22,6 +22,7 @@ def _json(path: Path) -> dict[str, Any]:
 def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     errors: list[str] = []
+    installed_models: set[str] | None = None
 
     def record(name: str, operation) -> Any:
         try:
@@ -32,6 +33,15 @@ def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
             checks[name] = {"ready": False, "error": str(exc)}
             errors.append(name)
             return None
+
+    def check_model(model: str) -> str:
+        nonlocal installed_models
+        provider = OllamaProvider(
+            model, settings.ollama_base_url, settings.llm_timeout_seconds
+        )
+        if installed_models is None:
+            installed_models = provider.available_models()
+        return provider.check(installed_models)
 
     def corpus_check() -> dict[str, Any]:
         if settings.corpus_dir is None:
@@ -92,22 +102,14 @@ def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
             ):
                 raise ValueError("dense embedding dimensions are invalid")
             if settings.embedding_provider == "ollama":
-                details["embedding"] = OllamaProvider(
-                    settings.embedding_model,
-                    settings.ollama_base_url,
-                    settings.llm_timeout_seconds,
-                ).check()
+                details["embedding"] = check_model(settings.embedding_model)
         if settings.retrieval_mode == "hybrid_reranked" and (
             not settings.reranker_model or settings.reranker_model == "disabled"
         ):
             raise ValueError("reranker model is not configured")
         if settings.retrieval_mode == "hybrid_reranked":
             if settings.reranker_provider == "ollama":
-                details["reranker"] = OllamaProvider(
-                    settings.reranker_model,
-                    settings.ollama_base_url,
-                    settings.llm_timeout_seconds,
-                ).check()
+                details["reranker"] = check_model(settings.reranker_model)
             else:
                 details["reranker"] = settings.reranker_model
         return details or {"models": "not_required"}
@@ -117,11 +119,7 @@ def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
     def verifier_check() -> str:
         if not settings.llm_model:
             raise ValueError("verifier model is not configured")
-        return OllamaProvider(
-            settings.llm_model,
-            settings.ollama_base_url,
-            settings.llm_timeout_seconds,
-        ).check()
+        return check_model(settings.llm_model)
 
     record("verifier", verifier_check)
     record(
