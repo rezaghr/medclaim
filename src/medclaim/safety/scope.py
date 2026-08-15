@@ -1,4 +1,4 @@
-"""Conservative, deterministic routing before claim verification."""
+"""Deterministic safety routing before claim verification."""
 
 from __future__ import annotations
 
@@ -7,16 +7,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-SCOPE_RULE_VERSION = "medical-scope-v3"
+SCOPE_RULE_VERSION = "safety-scope-v4"
 ScopeCategory = Literal[
-    "MEDICAL_CLAIM",
-    "PUBLIC_HEALTH_CLAIM",
+    "GENERAL_CLAIM",
+    "INVALID_INPUT",
     "PERSONAL_DIAGNOSIS",
     "TREATMENT_REQUEST",
     "DOSAGE_REQUEST",
     "MEDICATION_CHANGE_REQUEST",
     "EMERGENCY_PERSONAL_REQUEST",
-    "NON_MEDICAL",
 ]
 MANDATORY_SAFETY_DISCLAIMER = (
     "MedClaimRAG verifies textual claims against a limited indexed corpus. "
@@ -56,37 +55,6 @@ _TREATMENT = re.compile(
     r"how should i treat|treat my|recommend (?:a )?(?:medication|treatment))\b",
     re.I,
 )
-_PUBLIC_HEALTH = re.compile(
-    r"\b(population|public health|community|incidence|prevalence|outbreak|"
-    r"vaccination rate|mortality rate|epidemic|pandemic)\b",
-    re.I,
-)
-_HEALTH_HAZARD_SUBJECT = re.compile(
-    r"\b(food|foods|cake|pancake|baking|mix|flour|meat|milk|egg|produce|"
-    r"drink|drinking water|water|air|chemical|consumer product|supplement|"
-    r"lead|asbestos)\b",
-    re.I,
-)
-_HEALTH_HAZARD_EFFECT = re.compile(
-    r"\b(expir(?:ed|ation)|toxic(?:ity)?|poison(?:ous|ing|ed)?|unsafe|"
-    r"contaminat(?:ed|ion)|foodborne|mold(?:y)?|allerg(?:y|ic|en)|"
-    r"anaphylaxis|health hazard)\b",
-    re.I,
-)
-_MEDICAL = re.compile(
-    r"\b(health|disease|illness|infection|symptom|patient|clinical|medical|"
-    r"vitamin|vaccine|aspirin|drug|medication|therapy|treatment|cancer|diabetes|"
-    r"heart|blood|respiratory|mortality|diagnosis|dose|dosage|prescription)\b",
-    re.I,
-)
-_BIOMEDICAL = re.compile(
-    r"\b(citrullinat(?:ed|ion)|proteins?|peptides?|amino acids?|genes?|genetic|"
-    r"genomic|dna|rna|neutrophils?|lymphocytes?|macrophages?|cytokines?|"
-    r"antibod(?:y|ies)|antigens?|enzymes?|receptors?|immune|immunologic|"
-    r"inflammat(?:ion|ory)|extracellular|intracellular|molecular|biochemical|"
-    r"biomarkers?|microbiome|pathogens?)\b",
-    re.I,
-)
 
 
 def _limited(category: ScopeCategory, message: str) -> ScopeDecision:
@@ -99,11 +67,11 @@ def _limited(category: ScopeCategory, message: str) -> ScopeDecision:
 
 
 def route_scope(text: str) -> ScopeDecision:
-    """Classify input with conservative rules; never infer a diagnosis."""
+    """Limit unsafe personal requests and allow other claims to reach retrieval."""
     if not isinstance(text, str) or not text.strip():
         return _limited(
-            "NON_MEDICAL",
-            "Enter a declarative medical or public-health claim to verify.",
+            "INVALID_INPUT",
+            "Enter a non-empty textual claim to verify.",
         )
     value = " ".join(text.split())
     if _PERSONAL.search(value) and _EMERGENCY.search(value):
@@ -135,27 +103,13 @@ def route_scope(text: str) -> ScopeDecision:
         return _limited(
             "TREATMENT_REQUEST", "MedClaimRAG cannot recommend medication or treatment."
         )
-    if _HEALTH_HAZARD_SUBJECT.search(value) and _HEALTH_HAZARD_EFFECT.search(value):
-        return ScopeDecision(
-            action="VERIFY",
-            category="PUBLIC_HEALTH_CLAIM",
-            message=None,
-            rule_version=SCOPE_RULE_VERSION,
-        )
-    if _PUBLIC_HEALTH.search(value):
-        return ScopeDecision(
-            action="VERIFY",
-            category="PUBLIC_HEALTH_CLAIM",
-            message=None,
-            rule_version=SCOPE_RULE_VERSION,
-        )
-    if _MEDICAL.search(value) or _BIOMEDICAL.search(value):
-        return ScopeDecision(
-            action="VERIFY",
-            category="MEDICAL_CLAIM",
-            message=None,
-            rule_version=SCOPE_RULE_VERSION,
-        )
-    return _limited(
-        "NON_MEDICAL", "Only medical and public-health textual claims are within scope."
+    # Medical relevance is deliberately not guessed from a keyword allowlist. The
+    # retriever and evidence gate are the source of truth for corpus coverage, so
+    # unfamiliar terminology and phrasing can proceed and abstain naturally when
+    # the indexed evidence does not support them.
+    return ScopeDecision(
+        action="VERIFY",
+        category="GENERAL_CLAIM",
+        message=None,
+        rule_version=SCOPE_RULE_VERSION,
     )
