@@ -9,6 +9,8 @@ from typing import Any, Protocol
 import httpx
 import numpy as np
 
+from medclaim.http import local_http_client
+
 MAX_QUERY_CHARACTERS = 5000
 
 
@@ -144,15 +146,14 @@ class OllamaEmbedder:
 
     def _request(self, texts: list[str]) -> list[list[float]]:
         try:
-            with httpx.Client(trust_env=False) as client:
-                response = client.post(
-                    f"{self.base_url}/api/embed",
-                    json={
-                        "model": self.model_id,
-                        "input": [f"{self.input_prefix}{text}" for text in texts],
-                    },
-                    timeout=self.timeout_seconds,
-                )
+            response = local_http_client().post(
+                f"{self.base_url}/api/embed",
+                json={
+                    "model": self.model_id,
+                    "input": [f"{self.input_prefix}{text}" for text in texts],
+                },
+                timeout=self.timeout_seconds,
+            )
             response.raise_for_status()
             payload = response.json()
         except httpx.TimeoutException as exc:
