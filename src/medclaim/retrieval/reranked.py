@@ -1,4 +1,4 @@
-"""Optional cross-encoder stage over a HybridRetriever candidate pool."""
+"""Optional Ollama reranking stage over a hybrid candidate pool."""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ class RerankedRetriever:
             reranker.model_id != self.configuration.model_id
             or reranker.model_revision != self.configuration.model_revision
             or reranker.batch_size != self.configuration.batch_size
-            or reranker.maximum_input_length != self.configuration.maximum_input_length
         ):
             raise RerankedRetrievalError(
                 "RERANKER_INVALID_CONFIGURATION: Reranker metadata does not match settings."
@@ -59,11 +58,8 @@ class RerankedRetriever:
         if self.configuration.enabled and candidates:
             try:
                 assert self.reranker is not None
-                results = self.reranker.rerank(
+                results, traced_candidates = self.reranker.rerank(
                     hybrid["query"], candidates, min(final_k, len(candidates))
-                )
-                traced_candidates = getattr(
-                    self.reranker, "last_scored_candidates", candidates
                 )
             except RerankerError as exc:
                 raise RerankedRetrievalError(str(exc)) from exc
@@ -89,7 +85,6 @@ class RerankedRetriever:
                     else self.configuration.device
                 ),
                 "reranker_batch_size": self.configuration.batch_size,
-                "maximum_input_length": self.configuration.maximum_input_length,
             },
             "returned_count": len(results),
             "latency_ms": {

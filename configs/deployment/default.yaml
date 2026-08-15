@@ -11,11 +11,11 @@ embedding_model: nomic-embed-text:latest
 embedding_query_prefix: "search_query: "
 reranker_provider: ollama
 reranker_model: dolphin-llama3:8b
-reranker_batch_size: 1
+reranker_batch_size: 9
 retrieval_mode: hybrid_reranked
 retrieval_candidate_count: 30
 top_k: 5
-gate_minimum_score: 0.75
+gate_minimum_score: 0.70
 gate_minimum_relevant_passages: 1
 gate_minimum_unique_documents: 1
 prompt_version: medical-verifier-v3-secure

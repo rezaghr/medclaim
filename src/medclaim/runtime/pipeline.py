@@ -73,6 +73,15 @@ def build_runtime_pipeline(settings: RuntimeSettings):
         settings.llm_timeout_seconds,
     )
     if settings.retrieval_mode == "hybrid_reranked":
+        reranker_provider = (
+            provider
+            if settings.reranker_model == settings.llm_model
+            else OllamaProvider(
+                settings.reranker_model,
+                settings.ollama_base_url,
+                settings.llm_timeout_seconds,
+            )
+        )
         reranking = RerankingConfiguration(
             enabled=True,
             model_id=settings.reranker_model,
@@ -82,10 +91,9 @@ def build_runtime_pipeline(settings: RuntimeSettings):
             device="ollama",
         )
         reranker = OllamaEvidenceReranker(
-            provider,
+            reranker_provider,
             model_id=settings.reranker_model,
             batch_size=reranking.batch_size,
-            maximum_input_length=reranking.maximum_input_length,
         )
         retriever = RerankedRetriever(retriever, reranker, reranking)
         score_field = "reranker_score"

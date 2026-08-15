@@ -19,14 +19,13 @@ class EvidenceReranker(Protocol):
     model_revision: str | None
     device: str
     batch_size: int
-    maximum_input_length: int
 
     def rerank(
         self,
         claim: str,
         candidates: list[dict[str, Any]],
         top_k: int,
-    ) -> list[dict[str, Any]]: ...
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
 
 @dataclass(frozen=True)
@@ -36,9 +35,8 @@ class RerankingConfiguration:
     model_revision: str | None = None
     candidate_count: int = 20
     final_evidence_k: int = 5
-    batch_size: int = 1
+    batch_size: int = 9
     device: str = "ollama"
-    maximum_input_length: int = 512
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -59,12 +57,6 @@ class RerankingConfiguration:
             self._invalid("final_evidence_k cannot exceed candidate_count")
         if not isinstance(self.batch_size, int) or isinstance(self.batch_size, bool) or self.batch_size < 1:
             self._invalid("batch_size must be a positive integer")
-        if (
-            not isinstance(self.maximum_input_length, int)
-            or isinstance(self.maximum_input_length, bool)
-            or self.maximum_input_length < 1
-        ):
-            self._invalid("maximum_input_length must be a positive integer")
 
     @staticmethod
     def _invalid(reason: str) -> None:

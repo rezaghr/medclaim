@@ -40,26 +40,16 @@ class OllamaEvidenceReranker:
         *,
         model_id: str,
         batch_size: int = 30,
-        maximum_input_length: int = 512,
     ) -> None:
         if not isinstance(model_id, str) or not model_id.strip():
             raise RerankerError("RERANKER_INVALID_CONFIGURATION: model_id must be non-empty.")
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
             raise RerankerError("RERANKER_INVALID_CONFIGURATION: batch_size must be positive.")
-        if (
-            not isinstance(maximum_input_length, int)
-            or isinstance(maximum_input_length, bool)
-            or maximum_input_length < 1
-        ):
-            raise RerankerError(
-                "RERANKER_INVALID_CONFIGURATION: maximum_input_length must be positive."
-            )
         self.provider = provider
         self.model_id = model_id.strip()
         self.model_revision = None
         self.device = "ollama"
         self.batch_size = batch_size
-        self.maximum_input_length = maximum_input_length
 
     @staticmethod
     def _prompt(claim: str, candidates: list[dict[str, Any]]) -> str:
@@ -154,13 +144,13 @@ passage ID exactly and return one score for every supplied passage, with no extr
         claim: str,
         candidates: list[dict[str, Any]],
         top_k: int = 5,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         if not isinstance(claim, str) or not claim.strip():
             raise RerankerError("RERANKER_EMPTY_CLAIM: Claim must be non-empty.")
         if not isinstance(candidates, list):
             raise RerankerError("RERANKER_INVALID_CANDIDATE: Candidates must be a list.")
         if not candidates:
-            return []
+            return [], []
         if (
             not isinstance(top_k, int)
             or isinstance(top_k, bool)
@@ -203,8 +193,7 @@ passage ID exactly and return one score for every supplied passage, with no extr
         )
         for rank, candidate in enumerate(ranked, start=1):
             candidate["reranker_rank"] = rank
-        self.last_scored_candidates = [dict(candidate) for candidate in ranked]
         selected = [dict(candidate) for candidate in ranked[:top_k]]
         for candidate in selected:
             candidate["rank"] = candidate["reranker_rank"]
-        return selected
+        return selected, [dict(candidate) for candidate in ranked]

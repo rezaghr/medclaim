@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -32,7 +33,7 @@ class RuntimeSettings(BaseModel):
     embedding_query_prefix: str = ""
     reranker_provider: str = "ollama"
     reranker_model: str = "disabled"
-    reranker_batch_size: int = Field(default=8, ge=1, le=30)
+    reranker_batch_size: int = Field(default=9, ge=1, le=30)
     retrieval_mode: str = "hybrid"
     retrieval_candidate_count: int = Field(default=30, ge=1, le=100)
     top_k: int = Field(default=5, ge=1, le=100)
