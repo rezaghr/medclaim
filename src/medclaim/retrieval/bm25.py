@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import os
 import pickle
@@ -12,14 +10,14 @@ import shutil
 import tempfile
 import time
 from datetime import datetime, timezone
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any
 
 from rank_bm25 import BM25Okapi
 
-from medclaim.corpus.scifact_corpus import corpus_content_hash
-
+from .artifact_io import load_corpus, load_json, sha256_file, write_json
 from .tokenization import TOKENIZER_NAME, tokenize_bm25
 
 BUILDER_VERSION = "1.0.0"
@@ -30,59 +28,14 @@ class BM25Error(Exception):
     """Raised for controlled BM25 artifact or retrieval failures."""
 
 
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-standard numeric value {value}")
-
-
-def _required(record: dict[str, Any], field: str, context: str) -> Any:
-    if field not in record or record[field] is None:
-        raise BM25Error(
-            f"BM25_CORPUS_MANIFEST_INVALID: {context} is missing {field!r}."
-        )
-    return record[field]
-
-
-def _load_json(path: Path, error_code: str) -> Any:
-    try:
-        with path.open(encoding="utf-8") as input_file:
-            return json.load(input_file, parse_constant=_reject_json_constant)
-    except FileNotFoundError as exc:
-        raise BM25Error(f"{error_code}: Required file does not exist: {path}.") from exc
-    except (json.JSONDecodeError, ValueError) as exc:
-        reason = getattr(exc, "msg", str(exc))
-        raise BM25Error(f"{error_code}: Could not parse {path}: {reason}.") from exc
-    except OSError as exc:
-        raise BM25Error(f"{error_code}: Could not read {path}: {exc}.") from exc
-
-
-def _load_passages(path: Path) -> list[dict[str, Any]]:
-    passages: list[dict[str, Any]] = []
-    try:
-        with path.open(encoding="utf-8") as input_file:
-            for line_number, line in enumerate(input_file, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    passage = json.loads(line, parse_constant=_reject_json_constant)
-                except (json.JSONDecodeError, ValueError) as exc:
-                    reason = getattr(exc, "msg", str(exc))
-                    raise BM25Error(
-                        "BM25_CORPUS_MANIFEST_INVALID: "
-                        f"Could not parse {path} at line {line_number}: {reason}."
-                    ) from exc
-                if not isinstance(passage, dict):
-                    raise BM25Error(
-                        "BM25_CORPUS_MANIFEST_INVALID: "
-                        f"Expected an object in {path} at line {line_number}."
-                    )
-                passages.append(passage)
-    except FileNotFoundError as exc:
-        raise BM25Error(
-            f"BM25_CORPUS_NOT_FOUND: Required file does not exist: {path}."
-        ) from exc
-    except OSError as exc:
-        raise BM25Error(f"BM25_CORPUS_NOT_FOUND: Could not read {path}: {exc}.") from exc
-    return passages
+_load_json = partial(load_json, error_type=BM25Error)
+_load_corpus = partial(load_corpus, prefix="BM25", error_type=BM25Error)
+_sha256_file = partial(
+    sha256_file, error_code="BM25_INDEX_NOT_FOUND", error_type=BM25Error
+)
+_write_json = partial(
+    write_json, error_code="BM25_OUTPUT_WRITE_FAILED", error_type=BM25Error
+)
 
 
 def _validate_version(index_version: str) -> None:
@@ -101,7 +54,10 @@ def _validate_version(index_version: str) -> None:
 def _validate_parameters(k1: float, b: float, epsilon: float) -> None:
     values = (k1, b, epsilon)
     if (
-        any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values)
+        any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in values
+        )
         or any(not math.isfinite(float(value)) for value in values)
         or k1 <= 0
         or not 0 <= b <= 1
@@ -112,121 +68,11 @@ def _validate_parameters(k1: float, b: float, epsilon: float) -> None:
         )
 
 
-def _validate_corpus_manifest(manifest: Any) -> dict[str, Any]:
-    if not isinstance(manifest, dict):
-        raise BM25Error("BM25_CORPUS_MANIFEST_INVALID: Manifest must be an object.")
-    if manifest.get("artifact_type") != "medical_evidence_corpus":
-        raise BM25Error(
-            "BM25_CORPUS_MANIFEST_INVALID: artifact_type must be "
-            "'medical_evidence_corpus'."
-        )
-    corpus_version = _required(manifest, "corpus_version", "Corpus manifest")
-    passage_count = _required(manifest, "passage_count", "Corpus manifest")
-    content_hash = _required(manifest, "content_hash", "Corpus manifest")
-    if not isinstance(corpus_version, str) or not corpus_version:
-        raise BM25Error(
-            "BM25_CORPUS_MANIFEST_INVALID: corpus_version must be a non-empty string."
-        )
-    if (
-        not isinstance(passage_count, int)
-        or isinstance(passage_count, bool)
-        or passage_count < 1
-    ):
-        raise BM25Error(
-            "BM25_CORPUS_MANIFEST_INVALID: passage_count must be a positive integer."
-        )
-    if (
-        not isinstance(content_hash, str)
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash) is None
-    ):
-        raise BM25Error(
-            "BM25_CORPUS_MANIFEST_INVALID: content_hash must be a prefixed SHA-256."
-        )
-    return manifest
-
-
-def _load_and_validate_corpus(
-    corpus_dir: Path,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if not corpus_dir.is_dir():
-        raise BM25Error(
-            f"BM25_CORPUS_NOT_FOUND: Corpus directory does not exist: {corpus_dir}."
-        )
-    manifest = _validate_corpus_manifest(
-        _load_json(corpus_dir / "manifest.json", "BM25_CORPUS_MANIFEST_INVALID")
-    )
-    passages = _load_passages(corpus_dir / "passages.jsonl")
-    if len(passages) != manifest["passage_count"]:
-        raise BM25Error(
-            "BM25_CORPUS_COUNT_MISMATCH: Corpus manifest declares "
-            f"{manifest['passage_count']} passages but passages.jsonl contains "
-            f"{len(passages)}."
-        )
-
-    seen_ids: set[str] = set()
-    required_fields = ("passage_id", "document_id", "dataset", "text", "corpus_version")
-    for passage in passages:
-        passage_id = passage.get("passage_id")
-        if not isinstance(passage_id, str) or not passage_id:
-            raise BM25Error(
-                "BM25_CORPUS_MANIFEST_INVALID: Passage has an empty or missing passage_id."
-            )
-        if passage_id in seen_ids:
-            raise BM25Error(
-                f"BM25_DUPLICATE_PASSAGE_ID: Passage ID {passage_id} appears more than once."
-            )
-        seen_ids.add(passage_id)
-        missing = [field for field in required_fields if field not in passage]
-        if missing:
-            raise BM25Error(
-                "BM25_CORPUS_MANIFEST_INVALID: "
-                f"Passage {passage_id} is missing {missing[0]!r}."
-            )
-        if not all(isinstance(passage[field], str) for field in required_fields):
-            raise BM25Error(
-                f"BM25_CORPUS_MANIFEST_INVALID: Passage {passage_id} has invalid fields."
-            )
-        if passage["corpus_version"] != manifest["corpus_version"]:
-            raise BM25Error(
-                "BM25_INDEX_CORPUS_MISMATCH: "
-                f"Passage {passage_id} uses corpus version "
-                f"{passage['corpus_version']!r}, not {manifest['corpus_version']!r}."
-            )
-
-    actual_hash = corpus_content_hash(passages)
-    if actual_hash != manifest["content_hash"]:
-        raise BM25Error(
-            "BM25_CORPUS_HASH_MISMATCH: passages.jsonl does not match the "
-            "content hash recorded in the corpus manifest."
-        )
-    return manifest, passages
-
-
-def _sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    try:
-        with path.open("rb") as input_file:
-            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
-                hasher.update(chunk)
-    except OSError as exc:
-        raise BM25Error(f"BM25_INDEX_NOT_FOUND: Could not read {path}: {exc}.") from exc
-    return f"sha256:{hasher.hexdigest()}"
-
-
 def _rank_bm25_version() -> str:
     try:
         return package_version("rank-bm25")
     except PackageNotFoundError:
         return "unknown"
-
-
-def _write_json(value: Any, path: Path) -> None:
-    try:
-        with path.open("w", encoding="utf-8") as output_file:
-            json.dump(value, output_file, ensure_ascii=False, allow_nan=False, indent=2)
-            output_file.write("\n")
-    except (OSError, ValueError) as exc:
-        raise BM25Error(f"BM25_OUTPUT_WRITE_FAILED: Could not write {path}: {exc}.") from exc
 
 
 def build_bm25_index(
@@ -247,7 +93,7 @@ def build_bm25_index(
             f"Index version {version!r} already exists. Use a new index version."
         )
 
-    corpus_manifest, passages = _load_and_validate_corpus(corpus_dir)
+    corpus_manifest, passages = _load_corpus(corpus_dir)
     tokenized_corpus: list[list[str]] = []
     passage_ids: list[str] = []
     for passage in passages:
@@ -263,7 +109,9 @@ def build_bm25_index(
 
     try:
         output_root.mkdir(parents=True, exist_ok=True)
-        temporary_dir = Path(tempfile.mkdtemp(prefix=f".{version}.tmp-", dir=output_root))
+        temporary_dir = Path(
+            tempfile.mkdtemp(prefix=f".{version}.tmp-", dir=output_root)
+        )
     except OSError as exc:
         raise BM25Error(
             f"BM25_OUTPUT_WRITE_FAILED: Could not create index build directory: {exc}."
@@ -341,13 +189,9 @@ def build_bm25_index(
 
 def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
     if not isinstance(manifest, dict) or manifest.get("artifact_type") != "bm25_index":
-        raise BM25Error(
-            "BM25_INDEX_MANIFEST_INVALID: Expected a BM25 index manifest."
-        )
+        raise BM25Error("BM25_INDEX_MANIFEST_INVALID: Expected a BM25 index manifest.")
     if manifest.get("retrieval_type") != "sparse":
-        raise BM25Error(
-            "BM25_INDEX_MANIFEST_INVALID: retrieval_type must be 'sparse'."
-        )
+        raise BM25Error("BM25_INDEX_MANIFEST_INVALID: retrieval_type must be 'sparse'.")
     for field in ("index_version", "corpus", "configuration", "files"):
         if field not in manifest:
             raise BM25Error(
@@ -382,9 +226,10 @@ def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
             )
     expected_paths = {"index": "index.pkl", "passage_ids": "passage_ids.json"}
     for key, expected_path in expected_paths.items():
-        if files[key]["path"] != expected_path or re.fullmatch(
-            r"sha256:[0-9a-f]{64}", str(files[key]["sha256"])
-        ) is None:
+        if (
+            files[key]["path"] != expected_path
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", str(files[key]["sha256"])) is None
+        ):
             raise BM25Error(
                 f"BM25_INDEX_MANIFEST_INVALID: Invalid path or checksum for {key}."
             )
@@ -429,12 +274,16 @@ class BM25Retriever:
         self.index_manifest = _validate_index_manifest(
             _load_json(index_dir / "manifest.json", "BM25_INDEX_MANIFEST_INVALID")
         )
-        self.corpus_manifest, self.passages = _load_and_validate_corpus(corpus_dir)
+        self.corpus_manifest, self.passages = _load_corpus(corpus_dir)
         self._validate_compatibility()
         self.passage_ids = self._load_mapping_and_validate_checksums()
-        self.passages_by_id = {passage["passage_id"]: passage for passage in self.passages}
+        self.passages_by_id = {
+            passage["passage_id"]: passage for passage in self.passages
+        }
         corpus_ids = [passage["passage_id"] for passage in self.passages]
-        if self.passage_ids != corpus_ids or len(set(self.passage_ids)) != len(corpus_ids):
+        if self.passage_ids != corpus_ids or len(set(self.passage_ids)) != len(
+            corpus_ids
+        ):
             raise BM25Error(
                 "BM25_PASSAGE_MAPPING_MISMATCH: passage_ids.json does not align "
                 "with the ordered corpus passages."

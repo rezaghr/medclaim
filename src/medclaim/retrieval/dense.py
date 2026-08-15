@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import os
 import re
@@ -11,13 +9,13 @@ import shutil
 import tempfile
 import time
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from medclaim.corpus.scifact_corpus import corpus_content_hash
-
+from .artifact_io import load_corpus, load_json, sha256_file, write_json
 from .embedding import (
     Embedder,
     EmbeddingError,
@@ -34,6 +32,16 @@ class DenseError(Exception):
     """Raised for controlled dense artifact or retrieval failures."""
 
 
+_load_json = partial(load_json, error_type=DenseError)
+_load_corpus = partial(load_corpus, prefix="DENSE", error_type=DenseError)
+_sha256_file = partial(
+    sha256_file, error_code="DENSE_INDEX_NOT_FOUND", error_type=DenseError
+)
+_write_json = partial(
+    write_json, error_code="DENSE_OUTPUT_WRITE_FAILED", error_type=DenseError
+)
+
+
 def _import_faiss():
     try:
         import faiss
@@ -42,124 +50,6 @@ def _import_faiss():
             "DENSE_DEPENDENCY_MISSING: Install faiss-cpu for dense retrieval."
         ) from exc
     return faiss
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-standard numeric value {value}")
-
-
-def _load_json(path: Path, error_code: str) -> Any:
-    try:
-        with path.open(encoding="utf-8") as input_file:
-            return json.load(input_file, parse_constant=_reject_json_constant)
-    except FileNotFoundError as exc:
-        raise DenseError(f"{error_code}: Required file does not exist: {path}.") from exc
-    except (json.JSONDecodeError, ValueError) as exc:
-        reason = getattr(exc, "msg", str(exc))
-        raise DenseError(f"{error_code}: Could not parse {path}: {reason}.") from exc
-    except OSError as exc:
-        raise DenseError(f"{error_code}: Could not read {path}: {exc}.") from exc
-
-
-def _load_passages(path: Path) -> list[dict[str, Any]]:
-    passages: list[dict[str, Any]] = []
-    try:
-        with path.open(encoding="utf-8") as input_file:
-            for line_number, line in enumerate(input_file, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    passage = json.loads(line, parse_constant=_reject_json_constant)
-                except (json.JSONDecodeError, ValueError) as exc:
-                    reason = getattr(exc, "msg", str(exc))
-                    raise DenseError(
-                        "DENSE_CORPUS_MANIFEST_INVALID: "
-                        f"Could not parse {path} at line {line_number}: {reason}."
-                    ) from exc
-                if not isinstance(passage, dict):
-                    raise DenseError(
-                        "DENSE_CORPUS_MANIFEST_INVALID: "
-                        f"Expected an object in {path} at line {line_number}."
-                    )
-                passages.append(passage)
-    except FileNotFoundError as exc:
-        raise DenseError(
-            f"DENSE_CORPUS_NOT_FOUND: Required file does not exist: {path}."
-        ) from exc
-    except OSError as exc:
-        raise DenseError(f"DENSE_CORPUS_NOT_FOUND: Could not read {path}: {exc}.") from exc
-    return passages
-
-
-def _load_and_validate_corpus(
-    corpus_dir: Path,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    if not corpus_dir.is_dir():
-        raise DenseError(
-            f"DENSE_CORPUS_NOT_FOUND: Corpus directory does not exist: {corpus_dir}."
-        )
-    manifest = _load_json(
-        corpus_dir / "manifest.json", "DENSE_CORPUS_MANIFEST_INVALID"
-    )
-    if not isinstance(manifest, dict) or manifest.get("artifact_type") != "medical_evidence_corpus":
-        raise DenseError(
-            "DENSE_CORPUS_MANIFEST_INVALID: Expected a medical evidence corpus."
-        )
-    corpus_version = manifest.get("corpus_version")
-    passage_count = manifest.get("passage_count")
-    content_hash = manifest.get("content_hash")
-    if not isinstance(corpus_version, str) or not corpus_version:
-        raise DenseError(
-            "DENSE_CORPUS_MANIFEST_INVALID: corpus_version must be non-empty."
-        )
-    if (
-        not isinstance(passage_count, int)
-        or isinstance(passage_count, bool)
-        or passage_count < 1
-    ):
-        raise DenseError(
-            "DENSE_CORPUS_MANIFEST_INVALID: passage_count must be positive."
-        )
-    if not isinstance(content_hash, str) or CHECKSUM_PATTERN.fullmatch(content_hash) is None:
-        raise DenseError(
-            "DENSE_CORPUS_MANIFEST_INVALID: content_hash must be a SHA-256."
-        )
-
-    passages = _load_passages(corpus_dir / "passages.jsonl")
-    if len(passages) != passage_count:
-        raise DenseError(
-            "DENSE_CORPUS_COUNT_MISMATCH: Corpus passage count does not match manifest."
-        )
-    seen_ids: set[str] = set()
-    required_fields = ("passage_id", "document_id", "dataset", "text", "corpus_version")
-    for passage in passages:
-        passage_id = passage.get("passage_id")
-        if not isinstance(passage_id, str) or not passage_id:
-            raise DenseError(
-                "DENSE_CORPUS_MANIFEST_INVALID: Passage has no valid passage_id."
-            )
-        if passage_id in seen_ids:
-            raise DenseError(
-                f"DENSE_DUPLICATE_PASSAGE_ID: Passage ID {passage_id} is duplicated."
-            )
-        seen_ids.add(passage_id)
-        if any(field not in passage or not isinstance(passage[field], str) for field in required_fields):
-            raise DenseError(
-                f"DENSE_CORPUS_MANIFEST_INVALID: Passage {passage_id} has invalid fields."
-            )
-        if not passage["text"].strip():
-            raise DenseError(
-                f"DENSE_EMPTY_PASSAGE: Passage {passage_id} contains empty text."
-            )
-        if passage["corpus_version"] != corpus_version:
-            raise DenseError(
-                "DENSE_INDEX_CORPUS_MISMATCH: Passage corpus version does not match manifest."
-            )
-    if corpus_content_hash(passages) != content_hash:
-        raise DenseError(
-            "DENSE_CORPUS_HASH_MISMATCH: passages.jsonl does not match its manifest."
-        )
-    return manifest, passages
 
 
 def _validate_version(version: str) -> None:
@@ -176,32 +66,14 @@ def _validate_version(version: str) -> None:
 
 
 def _validate_build_options(batch_size: int, device: str) -> None:
-    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+    if (
+        not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size < 1
+    ):
         raise DenseError("DENSE_INVALID_BATCH_SIZE: batch_size must be positive.")
     if device != "cpu":
         raise DenseError("DENSE_INVALID_DEVICE: Docker index builds use cpu.")
-
-
-def _sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    try:
-        with path.open("rb") as input_file:
-            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
-                hasher.update(chunk)
-    except OSError as exc:
-        raise DenseError(f"DENSE_INDEX_NOT_FOUND: Could not read {path}: {exc}.") from exc
-    return f"sha256:{hasher.hexdigest()}"
-
-
-def _write_json(value: Any, path: Path) -> None:
-    try:
-        with path.open("w", encoding="utf-8") as output_file:
-            json.dump(value, output_file, ensure_ascii=False, allow_nan=False, indent=2)
-            output_file.write("\n")
-    except (OSError, ValueError) as exc:
-        raise DenseError(
-            f"DENSE_OUTPUT_WRITE_FAILED: Could not write {path}: {exc}."
-        ) from exc
 
 
 def build_dense_index(
@@ -227,7 +99,10 @@ def build_dense_index(
             f"Index version {version!r} already exists. Use a new version."
         )
 
-    corpus_manifest, passages = _load_and_validate_corpus(corpus_dir)
+    corpus_manifest, passages = _load_corpus(corpus_dir)
+    empty = next((item["passage_id"] for item in passages if not item["text"].strip()), None)
+    if empty is not None:
+        raise DenseError(f"DENSE_EMPTY_PASSAGE: Passage {empty} contains empty text.")
     if embedder is None:
         raise DenseError("DENSE_INVALID_MODEL: An Ollama embedder is required.")
     try:
@@ -283,7 +158,9 @@ def build_dense_index(
 
     try:
         output_root.mkdir(parents=True, exist_ok=True)
-        temporary_dir = Path(tempfile.mkdtemp(prefix=f".{version}.tmp-", dir=output_root))
+        temporary_dir = Path(
+            tempfile.mkdtemp(prefix=f".{version}.tmp-", dir=output_root)
+        )
     except OSError as exc:
         raise DenseError(
             f"DENSE_OUTPUT_WRITE_FAILED: Could not create build directory: {exc}."
@@ -370,7 +247,9 @@ def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
         or manifest.get("artifact_type") != "dense_index"
         or manifest.get("retrieval_type") != "dense"
     ):
-        raise DenseError("DENSE_INDEX_MANIFEST_INVALID: Expected a dense index manifest.")
+        raise DenseError(
+            "DENSE_INDEX_MANIFEST_INVALID: Expected a dense index manifest."
+        )
     for field in ("index_version", "corpus", "embedding", "faiss", "files"):
         if field not in manifest:
             raise DenseError(
@@ -380,7 +259,10 @@ def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
     embedding = manifest["embedding"]
     faiss_config = manifest["faiss"]
     files = manifest["files"]
-    if not all(isinstance(section, dict) for section in (corpus, embedding, faiss_config, files)):
+    if not all(
+        isinstance(section, dict)
+        for section in (corpus, embedding, faiss_config, files)
+    ):
         raise DenseError("DENSE_INDEX_MANIFEST_INVALID: Invalid manifest structure.")
     if (
         not isinstance(manifest["index_version"], str)
@@ -418,12 +300,16 @@ def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
     for prefix_field in ("document_prefix", "query_prefix"):
         prefix = embedding.get(prefix_field)
         if prefix is not None and not isinstance(prefix, str):
-            raise DenseError("DENSE_INDEX_MANIFEST_INVALID: Invalid embedding prefix metadata.")
+            raise DenseError(
+                "DENSE_INDEX_MANIFEST_INVALID: Invalid embedding prefix metadata."
+            )
     if faiss_config != {
         "index_type": "IndexFlatIP",
         "metric": "cosine_similarity_via_normalized_inner_product",
     }:
-        raise DenseError("DENSE_INDEX_MANIFEST_INVALID: Unsupported FAISS configuration.")
+        raise DenseError(
+            "DENSE_INDEX_MANIFEST_INVALID: Unsupported FAISS configuration."
+        )
     expected_paths = {
         "index": "index.faiss",
         "embeddings": "embeddings.npy",
@@ -465,7 +351,7 @@ class DenseRetriever:
         self.index_manifest = _validate_index_manifest(
             _load_json(index_dir / "manifest.json", "DENSE_INDEX_MANIFEST_INVALID")
         )
-        self.corpus_manifest, self.passages = _load_and_validate_corpus(corpus_dir)
+        self.corpus_manifest, self.passages = _load_corpus(corpus_dir)
         indexed_corpus = self.index_manifest["corpus"]
         if (
             indexed_corpus["version"] != self.corpus_manifest["corpus_version"]
@@ -478,17 +364,23 @@ class DenseRetriever:
         self._validate_checksums()
         self.passage_ids = self._load_mapping()
         corpus_ids = [passage["passage_id"] for passage in self.passages]
-        if self.passage_ids != corpus_ids or len(set(self.passage_ids)) != len(corpus_ids):
+        if self.passage_ids != corpus_ids or len(set(self.passage_ids)) != len(
+            corpus_ids
+        ):
             raise DenseError(
                 "DENSE_PASSAGE_MAPPING_MISMATCH: Mapping does not match corpus order."
             )
-        self.passages_by_id = {passage["passage_id"]: passage for passage in self.passages}
-        self.embeddings = self._load_embeddings()
+        self.passages_by_id = {
+            passage["passage_id"]: passage for passage in self.passages
+        }
+        self._validate_embeddings()
         self.index = self._load_faiss_index()
 
         embedding_config = self.index_manifest["embedding"]
         if embedder is None:
-            raise DenseError("DENSE_INVALID_MODEL: An Ollama query embedder is required.")
+            raise DenseError(
+                "DENSE_INVALID_MODEL: An Ollama query embedder is required."
+            )
         try:
             model_matches = (
                 embedder.model_id == embedding_config["model_id"]
@@ -504,7 +396,10 @@ class DenseRetriever:
                 "DENSE_MODEL_MISMATCH: Query embedder metadata does not match index."
             )
         expected_query_prefix = embedding_config.get("query_prefix")
-        if expected_query_prefix is not None and getattr(embedder, "input_prefix", None) != expected_query_prefix:
+        if (
+            expected_query_prefix is not None
+            and getattr(embedder, "input_prefix", None) != expected_query_prefix
+        ):
             raise DenseError(
                 "DENSE_MODEL_MISMATCH: Query embedding prefix does not match index metadata."
             )
@@ -535,7 +430,7 @@ class DenseRetriever:
             )
         return mapping
 
-    def _load_embeddings(self) -> np.ndarray:
+    def _validate_embeddings(self) -> None:
         try:
             embeddings = np.load(self.index_dir / "embeddings.npy", allow_pickle=False)
             validated = normalized_float32_matrix(
@@ -557,7 +452,6 @@ class DenseRetriever:
             raise DenseError(
                 "DENSE_INDEX_LOAD_FAILED: Stored embeddings are not L2-normalized."
             )
-        return embeddings
 
     def _load_faiss_index(self):
         faiss = _import_faiss()
