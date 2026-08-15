@@ -19,13 +19,10 @@ import numpy as np
 from medclaim.corpus.scifact_corpus import corpus_content_hash
 
 from .embedding import (
-    DEFAULT_EMBEDDING_MODEL,
     Embedder,
     EmbeddingError,
-    SentenceTransformerEmbedder,
     normalize_claim_input,
     normalized_float32_matrix,
-    resolve_device,
 )
 
 BUILDER_VERSION = "1.0.0"
@@ -178,13 +175,11 @@ def _validate_version(version: str) -> None:
         )
 
 
-def _validate_build_options(batch_size: int, device: str) -> str:
+def _validate_build_options(batch_size: int, device: str) -> None:
     if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
         raise DenseError("DENSE_INVALID_BATCH_SIZE: batch_size must be positive.")
-    try:
-        return resolve_device(device)
-    except EmbeddingError as exc:
-        raise DenseError(str(exc)) from exc
+    if device != "cpu":
+        raise DenseError("DENSE_INVALID_DEVICE: Docker index builds use cpu.")
 
 
 def _sha256_file(path: Path) -> str:
@@ -213,7 +208,7 @@ def build_dense_index(
     corpus_dir: Path,
     output_root: Path,
     version: str,
-    model_id: str = DEFAULT_EMBEDDING_MODEL,
+    model_id: str = "nomic-embed-text:latest",
     batch_size: int = 64,
     device: str = "cpu",
     model_revision: str | None = None,
@@ -224,7 +219,7 @@ def build_dense_index(
 ) -> Path:
     """Embed passage text and create one immutable IndexFlatIP artifact."""
     _validate_version(version)
-    resolved_device = _validate_build_options(batch_size, device)
+    _validate_build_options(batch_size, device)
     index_dir = output_root / version
     if index_dir.exists():
         raise DenseError(
@@ -234,30 +229,23 @@ def build_dense_index(
 
     corpus_manifest, passages = _load_and_validate_corpus(corpus_dir)
     if embedder is None:
-        try:
-            embedder = SentenceTransformerEmbedder(
-                model_id, device=resolved_device, model_revision=model_revision
-            )
-        except EmbeddingError as exc:
-            raise DenseError(str(exc)) from exc
-    else:
-        try:
-            metadata_matches = (
-                embedder.model_id == model_id
-                and embedder.model_revision == model_revision
-                and isinstance(embedder.dimension, int)
-                and not isinstance(embedder.dimension, bool)
-                and embedder.dimension > 0
-            )
-        except AttributeError as exc:
-            raise DenseError(
-                "DENSE_INVALID_MODEL: Supplied embedder is missing required metadata."
-            ) from exc
-        if not metadata_matches:
-            raise DenseError(
-                "DENSE_MODEL_MISMATCH: Supplied embedder metadata does not match "
-                "build configuration."
-            )
+        raise DenseError("DENSE_INVALID_MODEL: An Ollama embedder is required.")
+    try:
+        metadata_matches = (
+            embedder.model_id == model_id
+            and embedder.model_revision == model_revision
+            and isinstance(embedder.dimension, int)
+            and not isinstance(embedder.dimension, bool)
+            and embedder.dimension > 0
+        )
+    except AttributeError as exc:
+        raise DenseError(
+            "DENSE_INVALID_MODEL: Supplied embedder is missing required metadata."
+        ) from exc
+    if not metadata_matches:
+        raise DenseError(
+            "DENSE_MODEL_MISMATCH: Supplied embedder metadata does not match build configuration."
+        )
 
     texts = [passage["text"] for passage in passages]
     try:
@@ -336,7 +324,7 @@ def build_dense_index(
                 "normalize_embeddings": True,
                 "dtype": "float32",
                 "batch_size": batch_size,
-                "provider": "ollama" if hasattr(embedder, "input_prefix") else "sentence_transformers",
+                "provider": "ollama",
                 "document_prefix": getattr(embedder, "input_prefix", None),
                 "query_prefix": query_prefix,
             },
@@ -424,8 +412,8 @@ def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
         or embedding["batch_size"] < 1
     ):
         raise DenseError("DENSE_INDEX_MANIFEST_INVALID: Invalid embedding metadata.")
-    provider = embedding.get("provider", "sentence_transformers")
-    if provider not in {"sentence_transformers", "ollama"}:
+    provider = embedding.get("provider")
+    if provider != "ollama":
         raise DenseError("DENSE_INDEX_MANIFEST_INVALID: Invalid embedding provider.")
     for prefix_field in ("document_prefix", "query_prefix"):
         prefix = embedding.get(prefix_field)
@@ -472,10 +460,8 @@ class DenseRetriever:
             )
         self.index_dir = index_dir
         self.corpus_dir = corpus_dir
-        try:
-            resolve_device(device)
-        except EmbeddingError as exc:
-            raise DenseError(str(exc)) from exc
+        if device != "cpu":
+            raise DenseError("DENSE_INVALID_DEVICE: Docker runtime device must be cpu.")
         self.index_manifest = _validate_index_manifest(
             _load_json(index_dir / "manifest.json", "DENSE_INDEX_MANIFEST_INVALID")
         )
@@ -502,14 +488,7 @@ class DenseRetriever:
 
         embedding_config = self.index_manifest["embedding"]
         if embedder is None:
-            try:
-                embedder = SentenceTransformerEmbedder(
-                    embedding_config["model_id"],
-                    device=device,
-                    model_revision=embedding_config["model_revision"],
-                )
-            except EmbeddingError as exc:
-                raise DenseError(str(exc)) from exc
+            raise DenseError("DENSE_INVALID_MODEL: An Ollama query embedder is required.")
         try:
             model_matches = (
                 embedder.model_id == embedding_config["model_id"]

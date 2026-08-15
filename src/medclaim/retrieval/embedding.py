@@ -9,9 +9,7 @@ from typing import Any, Protocol
 import httpx
 import numpy as np
 
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 MAX_QUERY_CHARACTERS = 5000
-SUPPORTED_DEVICES = {"cpu", "cuda", "auto"}
 
 
 class EmbeddingError(Exception):
@@ -32,20 +30,6 @@ class Embedder(Protocol):
         normalize_embeddings: bool,
         show_progress_bar: bool,
     ) -> np.ndarray: ...
-
-
-def resolve_device(device: str) -> str:
-    if device not in SUPPORTED_DEVICES:
-        raise EmbeddingError(
-            "DENSE_INVALID_DEVICE: Device must be 'cpu', 'cuda', or 'auto'."
-        )
-    if device != "auto":
-        return device
-    try:
-        import torch
-    except ImportError:
-        return "cpu"
-    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def normalize_claim_input(value: Any) -> str:
@@ -116,74 +100,6 @@ def normalized_float32_matrix(
             "DENSE_NONFINITE_EMBEDDING: Normalized embeddings are not finite."
         )
     return normalized
-
-
-class SentenceTransformerEmbedder:
-    """Lazy adapter around SentenceTransformer for production embedding calls."""
-
-    def __init__(
-        self,
-        model_id: str = DEFAULT_EMBEDDING_MODEL,
-        *,
-        device: str = "cpu",
-        model_revision: str | None = None,
-    ) -> None:
-        if not isinstance(model_id, str) or not model_id.strip():
-            raise EmbeddingError(
-                "DENSE_INVALID_MODEL: Model ID must be a non-empty string."
-            )
-        if model_revision is not None and (
-            not isinstance(model_revision, str) or not model_revision.strip()
-        ):
-            raise EmbeddingError(
-                "DENSE_INVALID_MODEL: Model revision must be null or non-empty."
-            )
-        self.model_id = model_id.strip()
-        self.model_revision = model_revision.strip() if model_revision else None
-        self.device = resolve_device(device)
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:
-            raise EmbeddingError(
-                "DENSE_DEPENDENCY_MISSING: Install sentence-transformers to load "
-                "the embedding model."
-            ) from exc
-        arguments: dict[str, Any] = {"device": self.device}
-        if self.model_revision is not None:
-            arguments["revision"] = self.model_revision
-        try:
-            self.model = SentenceTransformer(self.model_id, **arguments)
-            dimension = self.model.get_sentence_embedding_dimension()
-        except Exception as exc:
-            raise EmbeddingError(
-                f"DENSE_MODEL_LOAD_FAILED: Could not load {self.model_id}: {exc}."
-            ) from exc
-        if not isinstance(dimension, int) or isinstance(dimension, bool) or dimension < 1:
-            raise EmbeddingError(
-                "DENSE_INVALID_MODEL: Model returned an invalid embedding dimension."
-            )
-        self.dimension = dimension
-
-    def encode(
-        self,
-        texts: list[str],
-        *,
-        batch_size: int,
-        normalize_embeddings: bool,
-        show_progress_bar: bool,
-    ) -> np.ndarray:
-        try:
-            return self.model.encode(
-                texts,
-                batch_size=batch_size,
-                convert_to_numpy=True,
-                normalize_embeddings=normalize_embeddings,
-                show_progress_bar=show_progress_bar,
-            )
-        except Exception as exc:
-            raise EmbeddingError(
-                f"DENSE_ENCODING_FAILED: Embedding generation failed: {exc}."
-            ) from exc
 
 
 class OllamaEmbedder:
