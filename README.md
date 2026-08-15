@@ -4,6 +4,9 @@ MedClaimRAG verifies a textual medical or public-health claim against a small,
 indexed evidence corpus. It combines BM25 and FAISS retrieval, reranks the
 evidence, and asks a locally installed Ollama model for a structured verdict.
 
+For a detailed course on the architecture and the engineering concepts behind
+this codebase, read [STUDY_GUIDE.md](STUDY_GUIDE.md).
+
 The application is intended to run only through Docker Compose. Docker does not
 install Ollama or download models.
 
