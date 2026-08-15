@@ -13,9 +13,8 @@ RUN python -m pip install --no-cache-dir -r /app/requirements.txt
 
 COPY --chown=medclaim:medclaim src /app/src
 COPY --chown=medclaim:medclaim app /app/app
-COPY --chown=medclaim:medclaim scripts /app/scripts
-COPY --chown=medclaim:medclaim configs /app/configs
-COPY --chown=medclaim:medclaim README.md /app/README.md
+COPY --chown=medclaim:medclaim scripts/bootstrap_runtime_artifacts.py /app/scripts/bootstrap_runtime_artifacts.py
+COPY --chown=medclaim:medclaim configs/deployment/default.yaml /app/configs/deployment/default.yaml
 
 USER medclaim
 EXPOSE 8000 8501

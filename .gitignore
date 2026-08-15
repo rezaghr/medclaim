@@ -5,13 +5,5 @@ __pycache__/
 .codegraph/
 .env
 
-# Downloaded and generated datasets (test fixtures remain tracked separately)
-data/raw/
-data/processed/
-artifacts/corpora/
-artifacts/datasets/
-artifacts/indexes/
-artifacts/experiments/
-artifacts/evidence-gates/
-artifacts/calibration/
-artifacts/reviews/
+# Runtime artifacts live in Docker's named volume.
+artifacts/

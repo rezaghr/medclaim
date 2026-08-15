@@ -6,14 +6,12 @@ services:
       MEDCLAIM_CONFIG: /app/configs/deployment/default.yaml
       MEDCLAIM_STRICT_STARTUP: "true"
       MEDCLAIM_ENV: ${MEDCLAIM_ENV:-development}
-      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
       LLM_MODEL: ${LLM_MODEL:-dolphin-llama3:8b}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_BASE_URL: ${MEDCLAIM_DOCKER_OLLAMA_URL:-http://host.docker.internal:11434}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      MEDCLAIM_CORPUS_DIR: /app/artifacts/corpora/medical-corpus-v2
-      MEDCLAIM_BM25_INDEX_DIR: /app/artifacts/indexes/medical-bm25-v2
-      MEDCLAIM_DENSE_INDEX_DIR: /app/artifacts/indexes/medical-dense-v2
+      MEDCLAIM_CORPUS_DIR: /app/artifacts/corpora/bootstrap-corpus-v1
+      MEDCLAIM_BM25_INDEX_DIR: /app/artifacts/indexes/bootstrap-bm25-v1
+      MEDCLAIM_DENSE_INDEX_DIR: /app/artifacts/indexes/bootstrap-dense-v1
       MEDCLAIM_EMBEDDING_PROVIDER: ${MEDCLAIM_EMBEDDING_PROVIDER:-ollama}
       MEDCLAIM_EMBEDDING_MODEL: ${MEDCLAIM_EMBEDDING_MODEL:-nomic-embed-text:latest}
       MEDCLAIM_EMBEDDING_QUERY_PREFIX: "search_query: "
@@ -24,23 +22,20 @@ services:
       MEDCLAIM_RETRIEVAL_CANDIDATE_COUNT: ${MEDCLAIM_RETRIEVAL_CANDIDATE_COUNT:-30}
       MEDCLAIM_TOP_K: ${MEDCLAIM_TOP_K:-5}
       MEDCLAIM_GATE_MINIMUM_SCORE: ${MEDCLAIM_GATE_MINIMUM_SCORE:-0.75}
-      PERSISTENCE_ENABLED: ${PERSISTENCE_ENABLED:-false}
-      PERSIST_CLAIM_TEXT: ${PERSIST_CLAIM_TEXT:-false}
-      PERSIST_EXPLANATION: ${PERSIST_EXPLANATION:-false}
-      DATABASE_URL: ${DATABASE_URL:-}
     ports: ["8000:8000"]
-    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      artifacts-init:
+        condition: service_completed_successfully
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./artifacts/corpora:/app/artifacts/corpora:ro
-      - ./artifacts/indexes:/app/artifacts/indexes:ro
-      - ./artifacts/models:/app/artifacts/models:ro
+      - medclaim-artifacts:/app/artifacts:ro
       - ./configs:/app/configs:ro
-      - ./artifacts/experiments:/app/artifacts/experiments
     read_only: true
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5)"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -63,39 +58,23 @@ services:
       timeout: 3s
       retries: 5
 
-  tools:
-    build:
-      context: .
-      dockerfile: Dockerfile.tools
-    profiles: ["tools"]
-    entrypoint: []
-    command: ["python", "scripts/audit_spec_alignment.py", "--repository-root", ".", "--strict"]
+  artifacts-init:
+    build: .
+    user: "0:0"
+    command:
+      - python
+      - scripts/bootstrap_runtime_artifacts.py
+      - --artifact-root
+      - /app/artifacts
+      - --embedding-model
+      - ${MEDCLAIM_EMBEDDING_MODEL:-nomic-embed-text:latest}
+      - --ollama-base-url
+      - ${MEDCLAIM_DOCKER_OLLAMA_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ./data:/app/data
-      - ./artifacts:/app/artifacts
-      - ./configs:/app/configs:ro
-    security_opt: ["no-new-privileges:true"]
-
-  postgres:
-    image: postgres:17-alpine
-    profiles: ["persistence"]
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-medclaim}
-      POSTGRES_USER: ${POSTGRES_USER:-medclaim}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
-    volumes: ["postgres-data:/var/lib/postgresql/data"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  ollama:
-    image: ollama/ollama:latest
-    profiles: ["local-llm"]
-    volumes: ["ollama-data:/root/.ollama"]
-    ports: ["11434:11434"]
+      - medclaim-artifacts:/app/artifacts
+    restart: "no"
 
 volumes:
-  postgres-data:
-  ollama-data:
+  medclaim-artifacts:
