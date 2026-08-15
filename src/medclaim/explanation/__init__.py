@@ -1,6 +1,5 @@
-"""Explanation validation, authoritative attribution, and review exports."""
+"""Explanation validation and review exports."""
 
-from .attribution import AttributionError, CorpusResolver
 from .validation import (
     ExplanationValidationError,
     ExplanationValidationResult,
@@ -8,8 +7,6 @@ from .validation import (
 )
 
 __all__ = [
-    "AttributionError",
-    "CorpusResolver",
     "ExplanationValidationError",
     "ExplanationValidationResult",
     "ExplanationValidator",
