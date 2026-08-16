@@ -11,8 +11,12 @@ import streamlit as st
 
 from medclaim.ui import collect_used_evidence
 
+API_TIMEOUT_SECONDS = float(os.environ.get("MEDCLAIM_API_TIMEOUT_SECONDS", "300"))
 
-def open_internal_api(request: urllib.request.Request, timeout: float = 30):
+
+def open_internal_api(
+    request: urllib.request.Request, timeout: float = API_TIMEOUT_SECONDS
+):
     """Call the trusted MedClaim API without inheriting workstation proxy settings."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return opener.open(request, timeout=timeout)
@@ -178,8 +182,9 @@ if st.button("Verify claim", type="primary"):
         method="POST",
     )
     try:
-        with open_internal_api(request, timeout=30) as response:
-            result = json.load(response)
+        with st.spinner("Retrieving and verifying evidence..."):
+            with open_internal_api(request) as response:
+                result = json.load(response)
         decision = result.get("scope_decision", {})
         if decision.get("action") != "VERIFY":
             st.error(decision.get("message", "This request cannot be verified."))
