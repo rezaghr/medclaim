@@ -1,4 +1,4 @@
-"""Small corpus helpers shared by Docker bootstrap and runtime validation."""
+"""Corpus hashing helpers shared by dataset builders and runtime validation."""
 
 from __future__ import annotations
 
