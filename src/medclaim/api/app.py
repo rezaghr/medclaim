@@ -58,6 +58,15 @@ def create_app(
     @app.get("/health/ready", tags=["operations"])
     def readiness(response: Response) -> dict:
         snapshot = readiness_snapshot(resolved_settings)
+        if pipeline_error is not None:
+            snapshot["checks"]["pipeline"] = {
+                "ready": False,
+                "error": pipeline_error,
+            }
+            snapshot["failed_checks"].append("pipeline")
+            snapshot["status"] = "not_ready"
+        else:
+            snapshot["checks"]["pipeline"] = {"ready": True, "detail": "loaded"}
         if snapshot["status"] != "ready":
             response.status_code = 503
         return snapshot

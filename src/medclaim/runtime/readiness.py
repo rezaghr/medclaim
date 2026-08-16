@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,25 @@ def _json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain an object")
     return value
+
+
+@cache
+def _validated_corpus_manifest(corpus_dir: Path) -> dict[str, Any]:
+    """Validate immutable corpus contents once instead of on every health probe."""
+    manifest = _json(corpus_dir / "manifest.json")
+    if manifest.get("artifact_type") != "medical_evidence_corpus":
+        raise ValueError("corpus artifact_type is invalid")
+    passages_path = corpus_dir / "passages.jsonl"
+    with passages_path.open(encoding="utf-8") as handle:
+        passages = [json.loads(line) for line in handle if line.strip()]
+    if len(passages) != manifest.get("passage_count"):
+        raise ValueError("corpus passage count does not match its manifest")
+    content_hash = manifest.get("content_hash")
+    if not isinstance(content_hash, str) or corpus_content_hash(passages) != content_hash:
+        raise ValueError("corpus checksum does not match passages")
+    if set(manifest.get("datasets", [])) != {"scifact", "healthver", "pubhealth"}:
+        raise ValueError("corpus datasets are not the supported medical set")
+    return manifest
 
 
 def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
@@ -46,21 +66,7 @@ def readiness_snapshot(settings: RuntimeSettings) -> dict[str, Any]:
     def corpus_check() -> dict[str, Any]:
         if settings.corpus_dir is None:
             raise ValueError("MEDCLAIM_CORPUS_DIR is not configured")
-        manifest = _json(settings.corpus_dir / "manifest.json")
-        if manifest.get("artifact_type") != "medical_evidence_corpus":
-            raise ValueError("corpus artifact_type is invalid")
-        passages_path = settings.corpus_dir / "passages.jsonl"
-        with passages_path.open(encoding="utf-8") as handle:
-            passages = [json.loads(line) for line in handle if line.strip()]
-        if len(passages) != manifest.get("passage_count"):
-            raise ValueError("corpus passage count does not match its manifest")
-        content_hash = manifest.get("content_hash")
-        if not isinstance(content_hash, str) or corpus_content_hash(passages) != content_hash:
-            raise ValueError("corpus checksum does not match passages")
-        datasets = set(manifest.get("datasets", []))
-        if datasets != {"scifact", "healthver", "pubhealth"}:
-            raise ValueError("corpus datasets are not the supported medical set")
-        return manifest
+        return _validated_corpus_manifest(settings.corpus_dir)
 
     corpus = record("corpus", corpus_check)
 

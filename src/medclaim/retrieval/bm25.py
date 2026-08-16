@@ -264,7 +264,13 @@ def _validate_index_manifest(manifest: Any) -> dict[str, Any]:
 class BM25Retriever:
     """A validated BM25 index loaded once and reusable across searches."""
 
-    def __init__(self, index_dir: Path, corpus_dir: Path) -> None:
+    def __init__(
+        self,
+        index_dir: Path,
+        corpus_dir: Path,
+        *,
+        corpus_data: tuple[dict[str, Any], list[dict[str, Any]]] | None = None,
+    ) -> None:
         if not index_dir.is_dir():
             raise BM25Error(
                 f"BM25_INDEX_NOT_FOUND: Index directory does not exist: {index_dir}."
@@ -274,7 +280,7 @@ class BM25Retriever:
         self.index_manifest = _validate_index_manifest(
             _load_json(index_dir / "manifest.json", "BM25_INDEX_MANIFEST_INVALID")
         )
-        self.corpus_manifest, self.passages = _load_corpus(corpus_dir)
+        self.corpus_manifest, self.passages = corpus_data or _load_corpus(corpus_dir)
         self._validate_compatibility()
         self.passage_ids = self._load_mapping_and_validate_checksums()
         self.passages_by_id = {

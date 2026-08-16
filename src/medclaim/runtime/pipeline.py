@@ -52,6 +52,7 @@ def build_runtime_pipeline(settings: RuntimeSettings):
             settings.dense_index_dir,
             settings.corpus_dir,
             embedder=embedder,
+            corpus_data=(sparse.corpus_manifest, sparse.passages) if sparse else None,
         )
 
     retriever: Any

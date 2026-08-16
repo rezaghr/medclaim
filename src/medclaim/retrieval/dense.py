@@ -339,6 +339,7 @@ class DenseRetriever:
         device: str = "cpu",
         *,
         embedder: Embedder | None = None,
+        corpus_data: tuple[dict[str, Any], list[dict[str, Any]]] | None = None,
     ) -> None:
         if not index_dir.is_dir():
             raise DenseError(
@@ -351,7 +352,7 @@ class DenseRetriever:
         self.index_manifest = _validate_index_manifest(
             _load_json(index_dir / "manifest.json", "DENSE_INDEX_MANIFEST_INVALID")
         )
-        self.corpus_manifest, self.passages = _load_corpus(corpus_dir)
+        self.corpus_manifest, self.passages = corpus_data or _load_corpus(corpus_dir)
         indexed_corpus = self.index_manifest["corpus"]
         if (
             indexed_corpus["version"] != self.corpus_manifest["corpus_version"]
