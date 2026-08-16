@@ -3,9 +3,9 @@ environment: development
 llm_model: dolphin-llama3:8b
 ollama_base_url: http://127.0.0.1:11434
 llm_timeout_seconds: 120
-corpus_dir: artifacts/corpora/medical-corpus-v2
-bm25_index_dir: artifacts/indexes/medical-bm25-v2
-dense_index_dir: artifacts/indexes/medical-dense-v2
+corpus_dir: artifacts/corpora/medical-corpus-full-v1
+bm25_index_dir: artifacts/indexes/medical-bm25-full-v1
+dense_index_dir: artifacts/indexes/medical-dense-full-v1
 embedding_provider: ollama
 embedding_model: nomic-embed-text:latest
 embedding_query_prefix: "search_query: "

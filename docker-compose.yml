@@ -9,9 +9,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-dolphin-llama3:8b}
       OLLAMA_BASE_URL: ${MEDCLAIM_DOCKER_OLLAMA_URL:-http://host.docker.internal:11434}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
-      MEDCLAIM_CORPUS_DIR: /app/artifacts/corpora/bootstrap-corpus-v1
-      MEDCLAIM_BM25_INDEX_DIR: /app/artifacts/indexes/bootstrap-bm25-v1
-      MEDCLAIM_DENSE_INDEX_DIR: /app/artifacts/indexes/bootstrap-dense-v1
+      MEDCLAIM_CORPUS_DIR: /app/artifacts/corpora/medical-corpus-full-v1
+      MEDCLAIM_BM25_INDEX_DIR: /app/artifacts/indexes/medical-bm25-full-v1
+      MEDCLAIM_DENSE_INDEX_DIR: /app/artifacts/indexes/medical-dense-full-v1
       MEDCLAIM_EMBEDDING_PROVIDER: ${MEDCLAIM_EMBEDDING_PROVIDER:-ollama}
       MEDCLAIM_EMBEDDING_MODEL: ${MEDCLAIM_EMBEDDING_MODEL:-nomic-embed-text:latest}
       MEDCLAIM_EMBEDDING_QUERY_PREFIX: "search_query: "
@@ -45,6 +45,7 @@ services:
     command: ["streamlit", "run", "app/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
     environment:
       MEDCLAIM_API_URL: http://api:8000
+      MEDCLAIM_API_TIMEOUT_SECONDS: ${MEDCLAIM_API_TIMEOUT_SECONDS:-300}
     depends_on:
       api:
         condition: service_healthy
@@ -63,7 +64,7 @@ services:
     user: "0:0"
     command:
       - python
-      - scripts/bootstrap_runtime_artifacts.py
+      - scripts/initialize_runtime_artifacts.py
       - --artifact-root
       - /app/artifacts
       - --embedding-model
