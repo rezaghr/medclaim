@@ -45,12 +45,75 @@ producing a structured verdict and explanation. RAG reduces dependence on model
 memory, but it does not make the output automatically correct. Every boundary
 still needs validation.
 
+### The exact default pipeline and its cardinalities
+
+The current Docker configuration is not an abstract “hybrid RAG” label. It is
+this concrete sequence:
+
+```text
+1 input claim
+  -> safety rules
+  -> normally 1 atomic component
+  -> BM25 scans 101,491 passages and returns 50
+  -> FAISS searches 101,491 vectors and returns 50
+  -> RRF fuses the two lists and retains 30
+  -> Ollama reranker scores 30 in batches of 9
+  -> reranker retains the best 5
+  -> evidence gate keeps only passages scoring >= 0.70
+  -> Ollama verifier returns verdict + confidence + citations
+  -> application validators accept, correct once, or fail
+  -> component aggregation produces the API result
+```
+
+The word “score” is overloaded, so keep these four quantities separate:
+
+| Quantity | Produced by | Meaning | Used as probability? |
+|---|---|---|---|
+| `bm25_score` | BM25 | Lexical term-match strength | No |
+| `dense_score` | FAISS | Cosine similarity between embeddings | No |
+| `rrf_score` | RRF | Agreement of rank positions | No |
+| `reranker_score` | Ollama reranker | Uncalibrated direct-relevance judgment | No |
+| `confidence` | Ollama verifier | Uncalibrated confidence in its evidence-bound verdict | No |
+
+Only `reranker_score` is compared with the current evidence threshold. Verdict
+`confidence` is displayed to the user but is not used to decide whether the gate
+opens. A high dense similarity cannot directly become high verdict confidence,
+and a high relevance score does not imply that the claim is true: relevant
+evidence may refute it.
+
+### Current parameters at a glance
+
+| Stage | Parameter | Current value | Effect |
+|---|---|---:|---|
+| Chunking | maximum words | 120 | Upper bound based on whitespace-separated words |
+| Chunking | overlap | 0 | Adjacent passages do not repeat text intentionally |
+| BM25 | `k1` | 1.5 | Controls term-frequency saturation |
+| BM25 | `b` | 0.75 | Controls passage-length normalization |
+| BM25 | `epsilon` | 0.25 | Floors negative IDF values in `rank-bm25` |
+| Hybrid | sparse candidates | 50 | BM25 results entering fusion |
+| Hybrid | dense candidates | 50 | FAISS results entering fusion |
+| RRF | `k` | 60 | Dampens rank-position differences |
+| Reranking | candidate count | 30 | Fused passages scored by the LLM |
+| Reranking | batch size | 9 | Maximum passages per generation call |
+| Final evidence | `top_k` | 5 | Maximum reranked passages offered to the gate/verifier |
+| Gate | minimum score | 0.70 | Minimum reranker score considered directly relevant |
+| Gate | minimum relevant passages | 1 | Required count at or above threshold |
+| Gate | minimum unique documents | 1 | Required provenance diversity |
+| Embedding build | batch size | 64 | Passages per Ollama embedding request |
+| API input | maximum claim characters | 5,000 | Pydantic and embedding-input bound |
+| Decomposition | maximum components | 4 | Hard limit if a provider is later connected |
+| Explanation | word range | 5–120 | Accepted explanation length |
+| Absolute-claim pass | focused passages | 3 | Counterexample candidates in the second verifier pass |
+| Ollama | per-call timeout | 120 s runtime, 600 s index build | Bounds one model HTTP call, not the whole pipeline |
+| Streamlit | whole-request timeout | 300 s | Bounds waiting for the complete API request |
+
 ## 2. Repository map and responsibility boundaries
 
 | Area | Main files | Responsibility |
 |---|---|---|
 | Container startup | `docker-compose.yml`, `Dockerfile` | Order services, mount artifacts, connect containers to host Ollama |
-| Artifact initialization | `scripts/bootstrap_runtime_artifacts.py` | Create the starter corpus and build BM25/FAISS indexes |
+| Artifact initialization | `scripts/initialize_runtime_artifacts.py` | Download and normalize all three releases, then build BM25/FAISS indexes |
+| Dataset normalization | `src/medclaim/corpus/full.py` | Map three source schemas into canonical documents, claims, passages, and evidence sets |
 | HTTP API | `src/medclaim/api/app.py` | Validate requests, expose health/metrics/verification endpoints |
 | Application service | `src/medclaim/runtime/service.py` | Safety routing, request correlation, metrics, error translation |
 | Pipeline assembly | `src/medclaim/runtime/pipeline.py` | Construct and connect retrievers, reranker, gate, and verifier |
@@ -159,6 +222,27 @@ The initializer is operationally idempotent for an existing volume:
 
 Therefore repeated `docker compose up` calls normally reuse the same artifacts.
 
+The named volume is `medclaim_medclaim-artifacts` under the default Compose
+project name. Inside containers, its important layout is:
+
+```text
+/app/artifacts/downloads/                         pinned raw releases
+/app/artifacts/corpora/medical-corpus-full-v1/   normalized JSONL corpus
+/app/artifacts/indexes/medical-bm25-full-v1/     sparse index
+/app/artifacts/indexes/medical-dense-full-v1/    vectors and FAISS index
+```
+
+The downloader publishes each source through a `.part` file, retries download
+up to three times with short exponential delays, verifies a hard-coded SHA-256,
+and only then replaces the cached source filename. Existing cached downloads are
+also hashed before reuse. This prevents an interrupted or changed upstream file
+from silently entering normalization.
+
+The current generated corpus directory contains `documents.jsonl`,
+`passages.jsonl`, `claims.jsonl`, `gold_evidence.jsonl`, `manifest.json`, and
+`quality_report.json`. These are combined multi-dataset files; each record has a
+`dataset` field rather than maintaining three duplicated runtime layouts.
+
 This is not the same as a bit-for-bit reproducible rebuild. If the volume is
 deleted, timestamps change and Ollama embedding output may vary with model or
 runtime versions. The logical operation is "ensure usable versioned artifacts
@@ -209,13 +293,185 @@ one artifact-building job.
 
 ## 5. Corpus structure, hashing, and indexing
 
+### Three source schemas, one canonical contract
+
+The datasets do not share a schema, so `corpus/full.py` acts as an adapter
+boundary. It downloads immutable source files whose SHA-256 checksums are fixed
+in code, cleans Unicode and whitespace, namespaces every ID by dataset, and
+emits `documents.jsonl`, `passages.jsonl`, `claims.jsonl`,
+`gold_evidence.jsonl`, a manifest, and a quality report.
+
+| Dataset | Source unit | Normalization result |
+|---|---|---|
+| SciFact | 5,183 abstracts plus 1,409 claims | Abstract sentences become 11,933 grouped passages; sentence-level gold evidence is mapped to every passage containing that sentence |
+| HealthVer | 14,330 claim/evidence CSV rows | Every row remains a claim; identical evidence text is content-hash deduplicated into 734 documents and 736 passages |
+| PUBHEALTH | Fact-check claims and long article text | 12,255 usable rows become documents and claims; long articles become 88,822 sentence-aware passages |
+
+PUBHEALTH's official files contain 26 rows without usable claim/article text
+and 11 structurally malformed TSV rows. The raw ZIP is retained, while those
+rows are excluded from retrieval and counted in `quality_report.json`. This is
+data-quality handling, not synthetic repair: inventing missing column boundaries
+or evidence would make the evaluation corpus less trustworthy.
+
+The unified labels are `SUPPORTS`, `REFUTES`, `NOT_ENOUGH_INFO`, and `MIXED`.
+Original labels and splits remain on each claim, so normalization does not erase
+dataset-specific provenance. SciFact test claims and unknown source labels stay
+unlabeled instead of receiving fabricated ground truth.
+
+### Canonical records: what normalization actually produces
+
+Normalization does not force each source row into one giant lossy table. It
+creates four related record types, each designed for one responsibility:
+
+```text
+document  = preserved source text and provenance
+passage   = bounded retrieval unit derived from a document
+claim     = proposition and label used for evaluation
+gold set  = mapping from a labeled claim to its evidence passages
+```
+
+A canonical document contains `document_id`, `dataset`, original source ID,
+title, source type, complete cleaned text, optional source sentences, metadata,
+content hash, and corpus version. A passage contains its own opaque ID, parent
+document ID, dataset, passage index, exact text, character offsets, word count,
+content hash, corpus version, and source-sentence metadata. A claim retains both
+the original and unified labels, original split, explanation when available,
+and evidence-set references.
+
+IDs are namespaced because the same integer may appear in multiple datasets:
+
+```text
+scifact:document:123
+healthver:claim:123
+pubhealth:document:train:123
+```
+
+Passage IDs are short ordered IDs such as `p0001234`. They are deliberately
+independent of source IDs: source identity remains in `document_id`, while the
+short passage ID is easier for a small local model to reproduce exactly in its
+`evidence_used` array.
+
+### Common text normalization
+
+Every textual field passes through the same conservative cleanup:
+
+1. Reject non-string values as empty input for that field.
+2. Apply Unicode NFKC normalization.
+3. Replace Unicode control characters with spaces.
+4. Collapse every whitespace run to one ordinary space.
+5. Strip leading and trailing whitespace.
+
+NFKC makes compatibility forms comparable—for example, full-width Latin
+characters normalize to their ordinary equivalents. This helps hashing and
+search consistency, but it is not medical-language rewriting. The builder does
+not paraphrase claims, correct scientific statements, translate text, or invent
+missing evidence.
+
+### Dataset-specific adapters
+
+SciFact supplies one abstract corpus plus train/dev/test claim files. An
+abstract becomes a document whose supplied abstract list remains the sentence
+boundary source. Claim evidence contains document IDs and exact sentence
+indexes. `SUPPORT` maps to `SUPPORTS`; `CONTRADICT` maps to `REFUTES`; claims
+without evidence in train/dev map to `NOT_ENOUGH_INFO`; unannotated test claims
+stay unlabeled. After chunking, every gold sentence index is resolved to the
+passage or passages containing that sentence.
+
+HealthVer supplies rows shaped approximately as `id, evidence, claim, label,
+topic_ip, question`. Every one of its 14,330 rows remains a claim. Repeated
+evidence is normalized, SHA-256 hashed, and stored once as a document; multiple
+claims may reference it. This is evidence deduplication, not row deletion.
+`Supports`, `Refutes`, and `Neutral` map to `SUPPORTS`, `REFUTES`, and
+`NOT_ENOUGH_INFO`.
+
+PUBHEALTH supplies claim metadata and a long `main_text` fact-check article.
+Each usable row becomes both a claim and a document. Split is included in its
+ID to prevent collisions. `true`, `false`, `unproven`, and `mixture` map to
+`SUPPORTS`, `REFUTES`, `NOT_ENOUGH_INFO`, and `MIXED`. The source explanation,
+fact checkers, date, subjects, and evidence-source URLs remain as provenance.
+
+### The sentence-aware chunking algorithm
+
+“Sentence-aware” is a repository-specific strategy, not the name of one
+standard library algorithm. Its objective is to keep complete neighboring
+sentences together without allowing an evidence prompt to receive an entire
+long article.
+
+The exact algorithm is:
+
+```text
+for each normalized document in deterministic dataset/source order:
+    obtain sentence spans
+    split any span longer than 120 words into <=120-word pieces
+    greedily append consecutive pieces while combined words <= 120
+    otherwise publish the current chunk and start the next one
+    discard a chunk only if it contains no alphanumeric character
+    store exact start/end character offsets and source sentence indexes
+```
+
+Sentence boundaries come from different places:
+
+- SciFact uses the abstract sentence list supplied by the dataset.
+- HealthVer treats one evidence statement as one source sentence.
+- PUBHEALTH approximates boundaries after `.`, `!`, or `?` followed by
+  whitespace because it supplies article text rather than sentence arrays.
+
+The word limit uses `text.split()`, so it counts whitespace-separated words,
+not embedding-model tokens. A 120-word chunk can therefore have more or fewer
+than 120 model tokens. There is no intentional overlap. If one source sentence
+is 250 words, it becomes pieces of at most 120, 120, and 10 words; all pieces
+retain the source sentence index where one exists.
+
+For example, sentence lengths `50, 40, 60` produce chunks `90, 60`, not one
+150-word chunk. Greedy grouping improves context continuity and avoids cutting
+ordinary sentences, while the hard fallback prevents a malformed or unusually
+long sentence from defeating the limit.
+
+No overlap reduces passage count, storage, embedding time, and duplicate search
+results. Its cost is boundary sensitivity: evidence requiring the last sentence
+of one chunk and first sentence of the next may be split. The current design
+relies on retrieving up to five passages rather than duplicating overlap into
+every chunk.
+
+### Gold-evidence resolution after chunking
+
+Gold annotations refer to source evidence, while runtime retrieval operates on
+passage IDs. The builder constructs two mappings:
+
+```text
+document_id -> all derived passages
+(document_id, sentence_index) -> passages containing that source sentence
+```
+
+SciFact and HealthVer use sentence-index mapping. PUBHEALTH evidence refers to
+the article document, so all passages derived from that article are associated
+with its gold evidence set. This can create broad PUBHEALTH gold sets; it does
+not mean every article passage independently proves the claim.
+
+### Data-quality policy
+
+The builder fails on corrupt SciFact/HealthVer identities, unknown required
+labels, invalid sentence indexes, duplicate canonical IDs, or unresolved gold
+evidence. PUBHEALTH's official release itself contains 26 empty rows and 11
+structurally malformed TSV rows; those raw rows remain in the cached ZIP and are
+counted in `quality_report.json`, but cannot safely become invented documents.
+One punctuation-only SciFact source fragment is retained in its document but
+not emitted as a searchable passage.
+
+The online `/v1/verify` path searches `passages.jsonl` through the indexes. It
+does not look up the user's text in `claims.jsonl`, copy a gold label, or send
+`gold_evidence.jsonl` to the verifier. Claims and gold mappings are preserved for
+evaluation and analysis. Keeping labels outside runtime inference prevents a
+benchmark claim from being “verified” merely by reading its answer key.
+
 ### Corpus versus index
 
 The corpus is the source collection of passages. An index is a derived data
 structure that makes searching the corpus efficient. If corpus content changes,
 the old index is no longer valid even if filenames happen to match.
 
-The starter corpus contains nine short passages. Each has:
+The full corpus currently contains 18,172 normalized documents and 101,491
+retrieval passages. Each passage has:
 
 - a stable `passage_id`
 - a `document_id`
@@ -272,7 +528,11 @@ IDF(term) * [f(term, passage) * (k1 + 1)]
 
 `f` is term frequency. `k1` controls frequency saturation: the tenth occurrence
 does not add ten times the value of the first. `b` controls length normalization.
-This project uses `k1=1.5` and `b=0.75`.
+This project uses `k1=1.5`, `b=0.75`, and `epsilon=0.25`. In
+`rank-bm25`, epsilon supplies a small positive floor derived from average IDF
+for terms whose raw IDF would be negative because they occur in more than half
+the corpus. It prevents extremely common terms from contributing a large
+negative value; it does not turn common words into strong evidence.
 
 ### Tokenization in this repository
 
@@ -290,9 +550,17 @@ The initializer tokenizes every passage and serializes a `rank_bm25.BM25Okapi`
 object with Python pickle. At query time, the retriever computes a score for
 every passage, sorts descending, and uses passage ID as a deterministic tie-break.
 
-The corpus has only nine passages, so this is tiny. With a large corpus, BM25
-implementations usually use an inverted index mapping terms to documents rather
-than scoring every document in Python.
+The standalone retriever accepts `top_k` from 1 through 100. In the default
+hybrid pipeline it returns 50. BM25 score magnitude is query- and corpus-
+dependent: `12` is not “twice as relevant” as `6`, and there is no global BM25
+threshold in this application. Only ordering enters RRF. A passage with a zero
+BM25 score may still be retrieved semantically by FAISS.
+
+The corpus has 101,491 passages. `rank-bm25` keeps token statistics in memory
+and scores the complete collection for each query. This remains practical at
+the current scale, but a much larger corpus would benefit from a disk-backed
+inverted index such as Lucene/OpenSearch rather than scoring every document in
+Python.
 
 ### Pickle tradeoff
 
@@ -344,8 +612,9 @@ Milvus, Qdrant, Weaviate, MongoDB vector search, or PostgreSQL/pgvector.
 
 Calling the current system a "vector database" would be inaccurate. It is a
 file-backed FAISS index loaded into API memory. Exact search is simple and
-correct for nine passages. At millions of passages, an approximate index such as
-HNSW or IVF would trade some recall for much lower latency and memory pressure.
+correct for roughly one hundred thousand passages. At millions of passages, an
+approximate index such as HNSW or IVF would trade some recall for much lower
+latency and memory pressure.
 
 ### Document and query prefixes
 
@@ -355,6 +624,36 @@ the text. The prefixes are part of the model contract, so the dense manifest
 records them and the retriever refuses to load a query embedder with a different
 prefix.
 
+### Build-time and query-time execution
+
+The initializer first probes `nomic-embed-text:latest` to discover its output
+dimension. It sends document text to Ollama's `/api/embed` endpoint in batches
+of 64 with the document prefix, validates and L2-normalizes the matrix, then
+adds all 101,491 rows to `faiss.IndexFlatIP`. The current artifact therefore
+contains 101,491 vectors of 768 `float32` values.
+
+Three files serve different purposes:
+
+```text
+index.faiss       searchable FAISS structure
+embeddings.npy    inspectable normalized source matrix
+passage_ids.json  vector-row position -> passage ID
+```
+
+For a request, the claim is normalized, limited to 5,000 characters, prefixed
+with `search_query: `, and embedded once. FAISS returns the 50 highest inner
+products in the default hybrid mode. Ties use passage ID deterministically after
+the FAISS result is converted into application records.
+
+`IndexFlatIP` is exact: it compares the query with every stored vector. Its
+approximate arithmetic work grows as `number_of_passages × dimension`; here that
+is roughly `101,491 × 768` multiply-add comparisons per query. It avoids recall
+loss and index-training parameters, at the cost of linear query work.
+
+Dense score is normally near the cosine range `[-1, 1]`, but the application
+does not interpret fixed bands as truth or direct evidence. It uses dense rank,
+not raw dense magnitude, during fusion.
+
 ### Validation
 
 The code rejects vectors with incorrect shape, dimension, zero norm, NaN, or
@@ -363,6 +662,10 @@ infinity. It converts to contiguous `float32`, normalizes them, stores both
 
 Storing both vectors and the FAISS index is redundant for serving, but it makes
 validation and inspection easier. The cost is additional disk space.
+In the validated build, `embeddings.npy` and `index.faiss` are about 312 MB
+each, and the complete downloads/corpus/BM25/dense artifact set is about 886 MB.
+The first full embedding build took roughly nine minutes on the development
+laptop; that is an observation, not a portable performance guarantee.
 
 ## 8. Hybrid retrieval and Reciprocal Rank Fusion
 
@@ -394,6 +697,31 @@ rewards agreement without assuming score calibration.
 not run them concurrently. It then validates that both indexes reference the
 same corpus identity and merges results by `passage_id`.
 
+Its constructor defaults are:
+
+```text
+sparse_top_k = 50
+dense_top_k  = 50
+fusion_top_k = 30
+rrf_k        = 60
+```
+
+The reranked pipeline explicitly asks hybrid retrieval for 30 candidates, so
+the fused list passed to Ollama has at most 30 records. A passage appearing in
+both input lists is one output record with two contributions; a passage
+appearing in only one list still remains eligible.
+
+For example, a passage ranked BM25 #2 and dense #10 receives:
+
+```text
+1/(60 + 2) + 1/(60 + 10) = 0.030414...
+```
+
+Another passage ranked #1 only in BM25 receives `1/61 = 0.016393...`, so cross-
+retriever agreement can outweigh one excellent isolated rank. `rrf_k=60`
+dampens the difference between nearby ranks. A smaller value would emphasize
+top positions more aggressively; a larger value would flatten contributions.
+
 Tie-breaking is deterministic: descending RRF score, then best component rank,
 then passage ID.
 
@@ -416,7 +744,10 @@ that directly addresses the complete claim.
 
 Reranking applies a more expensive model to the candidate set and produces a
 new ordering. Traditional rerankers are often trained cross-encoders. This
-repository instead uses the local generative Ollama model as a pointwise scorer.
+repository instead uses the local generative Ollama model to assign a
+claim-passage relevance score. The judgment is pointwise in the sense that each
+output score belongs to one passage, although several passages are presented in
+the same generation batch.
 
 ### Current prompt contract
 
@@ -436,21 +767,27 @@ hardware, or runtime implementations.
 
 ### Pointwise scoring and batch size
 
-The current Compose setting is `MEDCLAIM_RERANKER_BATCH_SIZE=9`. The bundled
-nine-passage corpus therefore fits in one Ollama generation call. If a larger
-corpus produces more candidates, the reranker divides them into batches of nine.
+The current Compose settings retrieve 30 candidates and use
+`MEDCLAIM_RERANKER_BATCH_SIZE=9`. The reranker therefore divides a normal
+candidate set into four Ollama generation calls: three batches of nine and one
+batch of three.
 
-Scoring one passage per request avoids asking a small model to produce a large
-array, but it has two costs:
+Each call returns an object shaped like:
 
-- High latency because calls are sequential.
-- Poor score comparability because the model never sees competing passages in
-  the same context.
+```json
+{
+  "scores": [
+    {"passage_id": "p0001234", "relevance_score": 0.82}
+  ]
+}
+```
 
-The configured batch reduces calls and lets the model compare passages
-implicitly, but large structured outputs may be less reliable for a small
-model. `_score_resilient` handles malformed multi-passage output by recursively
-splitting only the failing batch.
+Four sequential generation calls are a major part of request latency. Batching
+reduces the number of calls and places some competing passages in the same
+context, but passages in different batches are not jointly compared. Therefore
+score comparability across all 30 passages is imperfect. Larger batches reduce
+round trips but ask a small model for larger, more failure-prone structured
+arrays; smaller batches increase latency.
 
 ### Validation and recovery
 
@@ -461,6 +798,11 @@ and tries smaller groups.
 
 This is a retry-like recovery strategy, but it is not a general network retry.
 Timeouts and HTTP failures are not retried.
+
+Temperature is zero, but the score is still not guaranteed to be identical on
+every run. Model blobs, Ollama versions, floating-point kernels, prompt context,
+and batch composition can change generation. Even an identical decimal should
+be treated as a policy input, not a measured probability.
 
 ### Sorting
 
@@ -539,6 +881,56 @@ reranker score is not meaningful for RRF or BM25. Configuration must therefore
 be coupled to retrieval mode; the current single threshold environment variable
 does not encode that relationship explicitly.
 
+For example, with two retrievers and `rrf_k=60`, the largest possible RRF score
+is `2/61 ≈ 0.0328`. Switching only `MEDCLAIM_RETRIEVAL_MODE=hybrid` while
+leaving the gate threshold at `0.70` would make every request abstain. Mode and
+threshold must be tuned as one policy. In pure BM25 or dense mode, the runtime
+also bypasses RRF/reranking and sends that retriever's top five directly to the
+gate.
+
+### Exact gate algorithm and parameters
+
+In default `hybrid_reranked` mode, the gate receives the five highest reranked
+passages. It validates provenance and finite scores, then computes:
+
+```text
+top_score = maximum reranker_score
+relevant  = candidates where reranker_score >= 0.70
+selected  = first 5 relevant candidates
+```
+
+It proceeds only when all three conditions hold:
+
+```text
+top_score >= gate_minimum_score                    # 0.70
+len(relevant) >= gate_minimum_relevant_passages   # 1
+unique document IDs in relevant >= minimum        # 1
+```
+
+The first failing condition determines the reason code. With current defaults,
+the last two conditions are effectively satisfied whenever one candidate
+crosses the threshold. They become meaningful if increased—for example,
+requiring two unique documents can reduce reliance on one source but may reject
+claims whose only authoritative evidence is one paper.
+
+The comparison is inclusive: exactly `0.70` passes. The gate does not average
+scores, convert them into confidence, inspect verdict direction, or consider
+BM25/dense/RRF scores in the default mode. It knows only evidence sufficiency,
+not whether the evidence supports or refutes. Direction is the verifier's job.
+
+If the gate abstains, its deterministic output is:
+
+```text
+verdict         = NOT_ENOUGH_INFO
+confidence      = 0.0
+evidence_used   = []
+verifier calls  = 0
+```
+
+This `0.0` is not a claim that `NOT_ENOUGH_INFO` is certainly correct. It means
+no model verdict was accepted because the relevance policy did not authorize a
+verification call.
+
 ## 11. Evidence-bound verification and prompt security
 
 ### Trust-boundary problem
@@ -587,6 +979,59 @@ evidence IDs, and limitations. The code rejects:
 
 This is defense in depth: Ollama's schema-guided generation improves the chance
 of valid output, but the application never assumes the model complied.
+
+### How verdict confidence is produced and checked
+
+The verifier model itself generates `confidence` together with its verdict. No
+formula derives it from BM25 score, cosine similarity, RRF, reranker score,
+number of citations, or dataset label. The prompt asks for a JSON-schema number
+between zero and one; application code then checks that the value is numeric,
+finite, not a Boolean, and inside `[0, 1]`.
+
+That is range validation, not calibration. Calibration would require evaluating
+many labeled claims and showing, for example, that results reported near `0.8`
+are correct about 80% of the time under a fixed corpus/model/prompt. This
+repository has no such fitted mapping, so the UI correctly describes confidence
+as a model estimate rather than a clinical probability.
+
+There are three common cases:
+
+```text
+gate abstains
+    -> confidence is deterministically 0.0; verifier did not run
+
+gate proceeds, one component
+    -> confidence is the verifier's validated number
+
+multiple components
+    -> overall confidence is min(component confidences)
+```
+
+The minimum aggregation rule is conservative but not statistical. Component
+outputs are neither independent probabilities nor guaranteed calibrated
+measurements. `min` simply prevents a compound result from appearing stronger
+than its weakest component.
+
+Confidence does not override evidence rules. A model response with confidence
+`0.99` is still rejected if it cites an unknown passage, lacks required
+citations, gives medical advice, contradicts its own verdict wording, or fails
+schema validation. Conversely, a relevance score of `0.95` only says a passage
+directly addresses the claim; it does not force `SUPPORTS` and does not become
+verdict confidence.
+
+### Explanation and citation validation
+
+For an accepted non-NEI verdict, at least one supplied passage must be cited.
+A verifier-generated `NOT_ENOUGH_INFO` must also cite the selected evidence that
+proved insufficient; only gate-level abstention is allowed to have no citations.
+Duplicate or unknown IDs are rejected.
+
+Explanations must contain 5 through 120 whitespace-separated words, must not be
+boilerplate-only, must use language consistent with the verdict, and must not
+contain configured personalized-treatment phrases. Causal wording is rejected
+unless the supplied passages themselves contain causal language. These checks
+are heuristics: they reduce obvious inconsistency but do not prove scientific
+quality.
 
 ### One correction attempt
 
@@ -712,11 +1157,11 @@ multiple requests, but each request occupies a thread during long Ollama waits.
 ### No queue and no backpressure
 
 There is no job queue controlling access to Ollama. Concurrent API requests can
-each issue several sequential operations. With nine reranker candidates in one
-batch, one verification normally makes roughly:
+each issue several sequential operations. With 30 candidates in batches of
+nine, one verification normally makes roughly:
 
 ```text
-1 query embedding + 1 reranker generation + 1 verifier generation
+1 query embedding + 4 reranker generations + 1 verifier generation
 ```
 
 Correction or absolute-claim passes can add calls. Multiple users multiply this
@@ -756,10 +1201,26 @@ answering that request unless an external aggregation strategy were added.
 
 ### Timeout layers
 
-The Ollama client has a per-call timeout, defaulting to 120 seconds. Streamlit
-waits only 30 seconds for the entire API request. This creates an important
-mismatch: the UI can report that the API is unavailable while the API thread is
-still processing Ollama calls.
+The runtime Ollama client has a 120-second timeout for each individual embed or
+generation request. The artifact initializer uses 600 seconds per embedding
+call because first-build batches may be slower. Streamlit waits up to 300
+seconds for the entire API request.
+
+These limits cover different scopes:
+
+```text
+LLM_TIMEOUT_SECONDS=120
+    applies separately to each Ollama call
+
+MEDCLAIM_API_TIMEOUT_SECONDS=300
+    applies once to Streamlit waiting for the complete pipeline
+```
+
+A normal single-component request makes one query-embedding call, four reranker
+generation calls for 30 candidates in batches of nine, and—if the gate
+proceeds—one verifier generation. Validation correction or absolute-claim
+counterexample handling can add another generation. Therefore total pipeline
+time can exceed one per-call timeout without any individual call timing out.
 
 Timeouts do not automatically cancel work across service boundaries. Closing the
 Streamlit HTTP connection does not guarantee the API stops its pipeline or that
@@ -837,6 +1298,33 @@ RuntimeSettings class defaults
 Compose supplies the artifact paths and most production values, so the paths in
 the YAML file are not the paths used by the Docker API.
 
+The main runtime controls are:
+
+| Environment variable | Settings field | Validation/current default |
+|---|---|---|
+| `LLM_MODEL` | verifier model | non-empty; `dolphin-llama3:8b` |
+| `OLLAMA_BASE_URL` | Ollama origin | HTTP(S) origin; host gateway in Compose |
+| `LLM_TIMEOUT_SECONDS` | per-call timeout | `>0`, at most 600; current 120 |
+| `MEDCLAIM_CORPUS_DIR` | corpus artifact | required in strict Docker startup |
+| `MEDCLAIM_BM25_INDEX_DIR` | BM25 artifact | required when sparse retrieval is used |
+| `MEDCLAIM_DENSE_INDEX_DIR` | FAISS artifact | required when dense retrieval is used |
+| `MEDCLAIM_EMBEDDING_MODEL` | embedding model | current `nomic-embed-text:latest` |
+| `MEDCLAIM_EMBEDDING_QUERY_PREFIX` | query role prefix | current `search_query: ` |
+| `MEDCLAIM_RERANKER_MODEL` | reranker model | required in reranked mode |
+| `MEDCLAIM_RERANKER_BATCH_SIZE` | passages per call | integer 1–30; current 9 |
+| `MEDCLAIM_RETRIEVAL_MODE` | pipeline variant | BM25, dense, hybrid, or hybrid-reranked |
+| `MEDCLAIM_RETRIEVAL_CANDIDATE_COUNT` | reranker pool | integer 1–100; current 30 |
+| `MEDCLAIM_TOP_K` | final evidence maximum | integer 1–100, no larger than candidate count; current 5 |
+| `MEDCLAIM_GATE_MINIMUM_SCORE` | gate threshold | finite; in reranked mode at most 1; current 0.70 |
+| `MEDCLAIM_API_TIMEOUT_SECONDS` | Streamlit wait | UI-only setting; current 300 |
+
+`gate_minimum_relevant_passages` and `gate_minimum_unique_documents` currently
+come from YAML and both default to one; they are not exposed through the
+environment map. Hybrid's 50/50 component depths and `rrf_k=60` are constructor
+defaults, not current YAML settings. Dense build batch size 64 and maximum chunk
+words 120 are initializer arguments. Knowing where a parameter lives matters:
+changing an environment variable that no loader reads has no effect.
+
 The frozen settings object prevents accidental mutation after startup. Its
 canonical JSON representation is hashed into `configuration_hash`, which is
 included in request logs. This helps correlate behavior with configuration.
@@ -847,6 +1335,20 @@ inside that configuration hash.
 
 ## 18. API boundaries and error semantics
 
+### Safety routing before retrieval
+
+The service first runs deterministic regular-expression rules. Personal
+emergency language returns an emergency-limited response; personalized dosage,
+medication-change, diagnosis, or treatment requests are scope-limited. General
+text proceeds to retrieval even when it contains unfamiliar terminology. The
+system deliberately does not use a medical-keyword allowlist: corpus retrieval
+and the evidence gate decide coverage.
+
+This router is a policy filter, not an intent classifier trained on broad data.
+Its strengths are auditability and deterministic behavior; its weakness is that
+natural-language paraphrases outside the patterns may be missed. It neither
+retrieves evidence nor contributes to confidence.
+
 Pydantic rejects empty claims, claims longer than 5000 characters, and unknown
 request fields. The API validates optional request IDs to prevent whitespace and
 unbounded header values.
@@ -855,10 +1357,10 @@ unbounded header values.
 `pipeline=None`. This supports liveness and diagnostic readiness instead of
 crashing immediately. Verification then returns a controlled 503.
 
-The tradeoff is that readiness independently rechecks artifacts and models but
-does not directly fail because `app.state.pipeline_error` is set. A pipeline
-construction bug not covered by readiness checks could theoretically yield a
-ready-looking service whose verification pipeline is absent.
+Readiness independently checks artifacts and models and also publishes the
+captured pipeline-construction error as a failed `pipeline` check. Therefore a
+live process with an unavailable pipeline returns HTTP 503 from readiness and
+Compose does not start Streamlit as though verification were ready.
 
 All `VerificationServiceError` failures become HTTP 503. That is simple but
 coarse. A provider timeout, malformed model output, and internal programming bug
@@ -900,7 +1402,12 @@ This system has several forms of reuse:
 
 - Docker's named volume preserves corpus and index artifacts.
 - The API loads BM25 and FAISS indexes once at process startup.
+- BM25 and dense retrievers share the same parsed corpus objects instead of
+  independently duplicating 101,491 passage dictionaries in memory.
 - The query embedder object is constructed once.
+- Successful immutable corpus validation is cached inside readiness, so the
+  ten-second health probe does not repeatedly parse and hash a 106 MB JSONL
+  passage file.
 - Ollama may keep model weights in memory internally.
 
 It does not cache query embeddings, retrieval results, reranker scores, or final
@@ -936,20 +1443,41 @@ version checks. None of that should be assumed to exist today.
 1. The API validates the request body.
 2. Safety routing classifies it as a general verifiable claim.
 3. Compound detection finds one proposition, so no decomposition is attempted.
-4. BM25 ranks the antibiotic passage highly due to `antibiotics` and related
-   terms, although `influenza` does not lexically equal `flu`.
-5. Dense retrieval recognizes semantic similarity between influenza and flu.
-6. RRF places `bootstrap_2` first.
-7. The Ollama reranker gives the passage `0.70`, meaning direct evidence under
-   its own prompt scale.
-8. The gate uses the same `0.70` boundary and transitions to `PROCEED`.
-9. The verifier receives the antibiotic passage and evaluates the claim.
-10. The expected result is `REFUTES` because the evidence says antibiotics do
-    not treat viral infections such as influenza.
+4. BM25 scores every passage and returns its best 50 lexical matches.
+5. Ollama embeds the claim; exact FAISS search returns 50 semantic matches.
+6. RRF merges those ranks and retains 30 candidates.
+7. The reranker makes four sequential calls and retains five candidates.
+8. The gate compares those candidates with the inclusive `0.70` threshold.
 
-The earlier incorrect behavior was not a retrieval failure or verifier mistake.
-It was a policy mismatch between the reranker scale and gate threshold.
-This kind of stage-by-stage trace is the correct way to diagnose a RAG system.
+At this point two legitimate execution paths exist:
+
+```text
+top reranker score < 0.70
+    -> gate ABSTAIN
+    -> NOT_ENOUGH_INFO, confidence 0.0
+    -> verifier never runs
+
+top reranker score >= 0.70
+    -> gate PROCEED
+    -> selected passages go to verifier
+    -> sufficiently direct contradiction should yield REFUTES
+```
+
+During full-corpus validation with the current local model, this example once
+received a top reranker score of `0.56`, so the correct behavior under the
+configured policy was abstention—even though a human may know the claim is
+false. That is not evidence that the final verdict should be hard-coded. It
+shows that corpus coverage, first-stage recall, reranker calibration, and gate
+policy are separate failure points.
+
+A second end-to-end test used a HealthVer claim about bats or pangolins as
+possible original hosts of COVID-19. It retrieved direct evidence, crossed the
+gate at `0.70`, and the verifier returned `SUPPORTS` with model confidence
+`0.90`. The relevance score authorized verification; the separate confidence
+came from the verifier and was validated only for structure/range.
+
+This stage-by-stage conditional trace is the right way to diagnose RAG. Starting
+from the final label and changing a prompt blindly hides which contract failed.
 
 ## 23. Failure analysis by stage
 
@@ -962,7 +1490,7 @@ When debugging, classify the failure before changing prompts:
 | Correct passage scored direct but result is NEI | evidence gate | Score field, threshold, minimum counts |
 | Gate proceeds but wrong verdict | verifier | Exact model-input evidence, verifier prompt, model output |
 | Good verdict rejected with 503 | validation | Schema, citations, explanation rules, correction attempt |
-| UI times out while API logs continue | timeout layering | Streamlit 30-second timeout, number of Ollama calls |
+| UI times out while API logs continue | timeout layering | Streamlit 300-second whole-request limit, per-call Ollama timeout, number of generations |
 | Wrong trace under concurrent load | request-state leak | Verify reranking returns request-local results |
 | Startup remains unready | artifact/model checks | Manifests, hashes, volume, `/api/tags`, model names |
 
@@ -983,7 +1511,8 @@ When debugging, classify the failure before changing prompts:
 1. Calibrate the now-aligned reranker and gate boundary against a labeled
    evaluation set. Consider categorical relevance instead of an arbitrary LLM
    decimal.
-2. Reconcile the 30-second UI timeout with worst-case API execution time.
+2. Replace long synchronous UI waits with cancellable background jobs or
+   streaming progress if compound verification becomes active.
 3. Add bounded concurrency or queuing around Ollama.
 4. Either wire a decomposition provider or remove the impression that runtime
    decomposition is active.
@@ -995,6 +1524,8 @@ When debugging, classify the failure before changing prompts:
    claim to measure.
 8. Pin or record model blob digests and image digests for stronger
    reproducibility.
+9. Make gate thresholds mode-specific so changing retrieval mode cannot silently
+   apply a reranker-scale threshold to BM25, cosine, or RRF scores.
 
 ## 26. Study exercises
 
@@ -1028,6 +1559,15 @@ readers do not observe partially written files.
 **Caching:** Reusing prior computation. This project caches loaded artifacts but
 not query results.
 
+**Calibration:** Empirically aligning reported scores with observed outcomes.
+The verifier and reranker numbers are range-validated but not calibrated.
+
+**Chunking:** Converting long documents into bounded retrieval units. This
+project greedily groups sentence-aware pieces up to 120 words without overlap.
+
+**Confidence:** The verifier model's bounded self-estimate for its verdict. It
+is not derived from retrieval scores and is not a clinical probability.
+
 **Concurrency:** Multiple requests making progress during overlapping time. The
 API can process sync routes in multiple threads.
 
@@ -1043,6 +1583,12 @@ LLM.
 
 **Index:** A derived search structure. BM25 and FAISS indexes accelerate two
 different notions of relevance.
+
+**Provenance:** Information connecting a passage to its dataset and source
+document. It makes evidence traceable and supports unique-document gate rules.
+
+**Reciprocal Rank Fusion:** Rank-based combination of BM25 and dense results
+using `1/(k+rank)` contributions rather than incomparable raw scores.
 
 **Lock:** A mechanism ensuring only one thread or process enters a critical
 section. Metrics use a thread lock; artifact creation has no file lock.
